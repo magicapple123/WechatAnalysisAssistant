@@ -31,6 +31,7 @@ Node.js 20.19；当前 CI/发布流水线使用 Python 3.12 和 Node.js 22 LTS�
 
 ```powershell
 python -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade "pip>=26.2,<27"
 .venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 .venv\Scripts\python.exe -m pip install -r packaging\requirements-build.txt
 npm ci --prefix frontend

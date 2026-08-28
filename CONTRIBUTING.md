@@ -16,6 +16,7 @@ Node.js 22。以下示例使用 Python 3.12。
 ```powershell
 # Python 后端
 py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade "pip>=26.2,<27"
 .venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
 .venv\Scripts\python.exe scripts\test-backend.py
 .venv\Scripts\python.exe -m ruff check backend scripts --select F,E9

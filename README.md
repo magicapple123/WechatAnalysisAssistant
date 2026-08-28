@@ -65,6 +65,7 @@ Electron 桌面端源码和从源码启动的本机网页版；项目不提供�
 ```powershell
 # 1. 安装后端依赖
 py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade "pip>=26.2,<27"
 .venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 
 # 2. 构建前端

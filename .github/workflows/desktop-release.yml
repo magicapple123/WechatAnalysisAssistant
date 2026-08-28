@@ -100,7 +100,7 @@ jobs:
         shell: pwsh
         run: |
           python -m venv .venv
-          .venv\Scripts\python.exe -m pip install --upgrade pip
+          .venv\Scripts\python.exe -m pip install --upgrade "pip>=26.2,<27"
           .venv\Scripts\python.exe -m pip install `
             --only-binary=av,pillow-heif,pillow `
             -r backend\requirements-dev.txt `

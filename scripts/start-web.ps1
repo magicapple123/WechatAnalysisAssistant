@@ -154,6 +154,9 @@ function Initialize-PythonEnvironment {
         # A failed synchronization must never leave a success stamp that causes
         # the next run to skip its repair attempt.
         Remove-Item -LiteralPath $requirementsStamp -Force -ErrorAction SilentlyContinue
+        Write-Host "Updating the Python package installer..."
+        Invoke-Checked $VenvPython -m pip install --disable-pip-version-check `
+            --upgrade "pip>=26.2,<27"
         Write-Host "Synchronizing Python runtime dependencies..."
         Invoke-Checked $VenvPython -m pip install --disable-pip-version-check `
             --only-binary=av,pillow-heif,pillow `
