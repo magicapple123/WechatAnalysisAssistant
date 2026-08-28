@@ -1,0 +1,55 @@
+name: 缺陷报告
+description: 报告可复现的功能或兼容性问题
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请勿上传密钥、聊天数据库、真实聊天内容、API Key 或未经脱敏的日志；安全漏洞请按 SECURITY.md 私下报告。
+  - type: input
+    id: version
+    attributes:
+      label: 应用版本
+      placeholder: 例如 0.1.0-beta.3；源码运行请填写提交哈希
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      placeholder: Windows 11 24H2、微信 4.x、Python 3.12 / 桌面安装包
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述
+      description: 说明实际表现与预期表现。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 出现……
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized_logs
+    attributes:
+      label: 已脱敏的错误信息
+      description: 可选。删除账号、路径、消息、密钥、令牌和数据库内容后再粘贴。
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已搜索现有 Issue，未发现相同问题。
+          required: true
+        - label: 我确认内容不含真实聊天数据、密钥、API Key 或其他个人信息。
+          required: true

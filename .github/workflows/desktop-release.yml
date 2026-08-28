@@ -1,0 +1,317 @@
+name: Desktop release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Build channel
+        required: true
+        default: beta
+        type: choice
+        options: [beta, release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Windows x64 installer
+    runs-on: windows-latest
+    timeout-minutes: 120
+    outputs:
+      channel: ${{ steps.release.outputs.channel }}
+      metadata: ${{ steps.release.outputs.metadata }}
+      signing_enabled: ${{ steps.signing.outputs.enabled }}
+    env:
+      PYTHONUTF8: '1'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+            packaging/requirements-build.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/package-lock.json
+
+      - name: Resolve release channel
+        id: release
+        shell: pwsh
+        run: |
+          $channel = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+              '${{ inputs.channel }}'
+          }
+          elseif ($env:GITHUB_REF_NAME -match '-') {
+              'beta'
+          }
+          else {
+              'release'
+          }
+          $metadata = if ($channel -eq 'beta') { 'beta.yml' } else { 'latest.yml' }
+          "channel=$channel" >> $env:GITHUB_OUTPUT
+          "metadata=$metadata" >> $env:GITHUB_OUTPUT
+
+      - name: Verify tag and application version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Get-Content desktop/package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+              throw "Tag $env:GITHUB_REF_NAME does not match desktop version v$version."
+          }
+
+      - name: Validate signing configuration
+        id: signing
+        shell: pwsh
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          $hasLink = -not [string]::IsNullOrWhiteSpace($env:CSC_LINK)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)
+          if ($hasLink -ne $hasPassword) {
+              throw 'CSC_LINK and CSC_KEY_PASSWORD must either both be configured or both be absent.'
+          }
+          if ('${{ steps.release.outputs.channel }}' -eq 'release' -and -not $hasLink) {
+              throw 'The release channel requires CSC_LINK and CSC_KEY_PASSWORD repository secrets.'
+          }
+          "enabled=$($hasLink.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip
+          .venv\Scripts\python.exe -m pip install `
+            --only-binary=av,pillow-heif,pillow `
+            -r backend\requirements-dev.txt `
+            -r packaging\requirements-build.txt
+          npm ci --prefix frontend
+          npm ci --prefix desktop
+
+      - name: Run release tests
+        shell: pwsh
+        run: |
+          .\scripts\check-source-safety.ps1
+          .venv\Scripts\python.exe scripts\test-backend.py
+          .venv\Scripts\python.exe -m ruff check backend scripts packaging/check_public_redistribution.py packaging/tests --select F,E9
+          .venv\Scripts\python.exe -m compileall -q backend scripts packaging/check_public_redistribution.py packaging/tests
+          npm run check --prefix frontend
+          npm test --prefix desktop
+          npm run check --prefix desktop
+
+      - name: Build and smoke-test installer
+        shell: pwsh
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: .\scripts\build-desktop.ps1 -Channel '${{ steps.release.outputs.channel }}'
+
+      - name: Require channel update metadata
+        shell: pwsh
+        run: |
+          $channel = '${{ steps.release.outputs.channel }}'
+          $metadata = Join-Path desktop\dist-electron '${{ steps.release.outputs.metadata }}'
+          if (-not (Test-Path -LiteralPath $metadata -PathType Leaf)) {
+              throw "Electron Builder did not produce the required $channel channel metadata: $metadata"
+          }
+
+      - name: Verify Authenticode signatures
+        if: steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $unpackedRoot = Resolve-Path desktop\dist-electron\win-unpacked
+          $applicationExecutables = @(
+              Get-ChildItem -LiteralPath $unpackedRoot -Filter '*.exe' -File |
+                  Where-Object { $_.Name -notin @('elevate.exe', 'uninstall.exe') }
+          )
+          if ($applicationExecutables.Count -ne 1) {
+              throw "Expected one packaged application executable; found $($applicationExecutables.Count)."
+          }
+          $sidecar = Join-Path $unpackedRoot 'resources\backend\WechatAnalysisAssistantBackend\WechatAnalysisAssistantBackend.exe'
+          $installers = @(Get-ChildItem desktop\dist-electron -Filter '*.exe' -File)
+          if ($installers.Count -eq 0 -or -not (Test-Path -LiteralPath $sidecar -PathType Leaf)) {
+              throw 'The installer or backend sidecar is missing from the signed build.'
+          }
+          $targets = @($applicationExecutables.FullName) + @($sidecar) + @($installers.FullName)
+          foreach ($target in $targets) {
+              $signature = Get-AuthenticodeSignature -LiteralPath $target
+              if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+                  throw "Authenticode verification failed for $target ($($signature.Status): $($signature.StatusMessage))."
+              }
+          }
+
+      - name: Create SHA-256 checksums
+        shell: pwsh
+        run: |
+          $releaseRoot = Resolve-Path desktop\dist-electron
+          $metadataNames = @('latest.yml', 'beta.yml', 'alpha.yml')
+          $assets = @(
+              Get-ChildItem $releaseRoot -File |
+                  Where-Object {
+                      $_.Extension -in @('.exe', '.blockmap') -or
+                      $_.Name -in $metadataNames
+                  } |
+                  Sort-Object Name
+          )
+          if ($assets.Count -eq 0) {
+              throw 'Electron Builder produced no release assets.'
+          }
+          if (@($assets | Where-Object Extension -eq '.exe').Count -eq 0) {
+              throw 'Electron Builder produced no Windows installer.'
+          }
+          $lines = foreach ($asset in $assets) {
+              $hash = (Get-FileHash $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($asset.Name)"
+          }
+          [IO.File]::WriteAllLines(
+              (Join-Path $releaseRoot 'SHA256SUMS.txt'),
+              $lines,
+              [Text.UTF8Encoding]::new($false)
+          )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WechatAnalysisAssistant-windows-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            desktop/dist-electron/*.exe
+            desktop/dist-electron/*.blockmap
+            desktop/dist-electron/latest.yml
+            desktop/dist-electron/beta.yml
+            desktop/dist-electron/alpha.yml
+            desktop/dist-electron/SHA256SUMS.txt
+
+  publish:
+    name: Publish tagged GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: WechatAnalysisAssistant-windows-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets
+
+      - name: Verify downloaded release assets
+        shell: pwsh
+        run: |
+          $releaseRoot = Resolve-Path release-assets
+          $expectedMetadata = Join-Path $releaseRoot '${{ needs.build.outputs.metadata }}'
+          $checksumFile = Join-Path $releaseRoot 'SHA256SUMS.txt'
+          if (-not (Test-Path -LiteralPath $expectedMetadata -PathType Leaf)) {
+              throw 'The downloaded artifact is missing its required channel metadata.'
+          }
+          if (-not (Test-Path -LiteralPath $checksumFile -PathType Leaf)) {
+              throw 'The downloaded artifact is missing SHA256SUMS.txt.'
+          }
+          $verifiedNames = [System.Collections.Generic.HashSet[string]]::new(
+              [System.StringComparer]::OrdinalIgnoreCase
+          )
+          foreach ($line in Get-Content -LiteralPath $checksumFile -Encoding utf8) {
+              if ($line -notmatch '^(?<hash>[0-9a-f]{64})  (?<name>[^\\/]+)$') {
+                  throw "Invalid checksum line: $line"
+              }
+              $asset = Join-Path $releaseRoot $Matches.name
+              if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
+                  throw "Checksummed asset is missing: $($Matches.name)"
+              }
+              $actual = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actual -ne $Matches.hash) {
+                  throw "SHA-256 mismatch for $($Matches.name)."
+              }
+              $verifiedNames.Add($Matches.name) | Out-Null
+          }
+          $metadataNames = @('latest.yml', 'beta.yml', 'alpha.yml')
+          $releaseAssets = @(
+              Get-ChildItem $releaseRoot -File |
+                  Where-Object {
+                      $_.Extension -in @('.exe', '.blockmap') -or
+                      $_.Name -in $metadataNames
+                  }
+          )
+          if (@($releaseAssets | Where-Object Extension -eq '.exe').Count -eq 0) {
+              throw 'The downloaded artifact contains no Windows installer.'
+          }
+          foreach ($asset in $releaseAssets) {
+              if (-not $verifiedNames.Contains($asset.Name)) {
+                  throw "Release asset is not covered by SHA256SUMS.txt: $($asset.Name)"
+              }
+          }
+
+      - name: Publish immutable GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $previousErrorPreference = $ErrorActionPreference
+          try {
+              $ErrorActionPreference = 'SilentlyContinue'
+              & gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
+              $releaseExists = $LASTEXITCODE -eq 0
+          }
+          finally {
+              $ErrorActionPreference = $previousErrorPreference
+          }
+          if ($releaseExists) {
+              throw "Release $env:GITHUB_REF_NAME already exists. Publish a new version instead of replacing existing assets."
+          }
+
+          $releaseRoot = Resolve-Path release-assets
+          $metadataNames = @('latest.yml', 'beta.yml', 'alpha.yml')
+          $assets = @(
+              Get-ChildItem $releaseRoot -File |
+                  Where-Object {
+                      $_.Extension -in @('.exe', '.blockmap') -or
+                      $_.Name -in $metadataNames -or
+                      $_.Name -eq 'SHA256SUMS.txt'
+                  } |
+                  Select-Object -ExpandProperty FullName
+          )
+          $notesPath = Join-Path $env:RUNNER_TEMP 'release-prefix.md'
+          $notes = if ('${{ needs.build.outputs.signing_enabled }}' -eq 'true') {
+              "> [!NOTE]`n> 此构建的 Windows 安装器、桌面主程序和后端组件已通过 CI Authenticode 验证。`n"
+          }
+          else {
+              "> [!WARNING]`n> **此 Beta 构建未使用可信 Authenticode 证书签名。Windows SmartScreen 可能阻止或警告运行。请先核对 SHA256SUMS.txt，并仅从本仓库 Release 页面下载。**`n"
+          }
+          [IO.File]::WriteAllText($notesPath, $notes, [Text.UTF8Encoding]::new($false))
+
+          $arguments = @(
+              'release', 'create', $env:GITHUB_REF_NAME,
+              '--repo', $env:GITHUB_REPOSITORY,
+              '--verify-tag',
+              '--title', "WechatAnalysisAssistant $env:GITHUB_REF_NAME",
+              '--generate-notes',
+              '--notes-file', $notesPath
+          )
+          if ('${{ needs.build.outputs.channel }}' -eq 'beta') {
+              $arguments += '--prerelease'
+          }
+          & gh @arguments @assets
+          if ($LASTEXITCODE -ne 0) {
+              throw "GitHub release creation failed with exit code $LASTEXITCODE."
+          }

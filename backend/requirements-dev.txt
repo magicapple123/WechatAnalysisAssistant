@@ -1,0 +1,9 @@
+# Development and CI dependencies. Keep runtime-only installations on
+# requirements.txt so the packaged application does not ship test tooling.
+-r requirements.txt
+
+# Starlette 1.x uses httpx2 for TestClient in new environments.
+httpx2>=2.0.0,<3.0.0
+
+# Keep static analysis deterministic across developer machines and CI.
+ruff==0.16.4

@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+.venv/
+venv/
+.pip-cache/
+
+# Node
+node_modules/
+.npm-cache/
+
+# Frontend build
+frontend/dist/
+coverage/
+
+# Desktop/release build staging
+desktop/dist-electron/
+desktop/resources/backend/
+desktop/resources/frontend/
+
+# Local diagnostics and runtime databases
+.diagnostic_localappdata/
+.diag*
+backend/*.sqlite3*
+*.log
+
+# Keys (security)
+wechat_key*.txt*
+wechat_key*.json*
+wechat_keys*.json*
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+
+# User settings and local databases
+settings.json
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# IDE
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temp
+*.tmp
+temp/
+.test-app-data/

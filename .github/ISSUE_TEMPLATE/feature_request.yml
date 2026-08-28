@@ -1,0 +1,37 @@
+name: 功能建议
+description: 建议一项符合本地优先原则的改进
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景
+      description: 你希望解决什么问题？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 描述期望交互、输入输出和可接受的替代方案。
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: 影响范围
+      options:
+        - 网页端
+        - Windows 桌面端
+        - 后端 / 数据解析
+        - 构建、文档或其他
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: 隐私与联网影响
+      description: 是否会读取新数据、调用外部服务或写入新文件？若不会，请填写“无”。
+    validations:
+      required: true

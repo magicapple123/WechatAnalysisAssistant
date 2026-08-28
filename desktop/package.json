@@ -1,0 +1,145 @@
+{
+  "name": "wechat-analysis-assistant-desktop",
+  "version": "0.1.0-beta.3",
+  "private": true,
+  "description": "WechatAnalysisAssistant Electron desktop application",
+  "type": "module",
+  "main": "src/main.mjs",
+  "author": "WechatAnalysisAssistant",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "postinstall": "install-electron",
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check-config.mjs",
+    "verify:fuses": "node scripts/check-fuses.mjs",
+    "smoke:backend": "node scripts/smoke-backend.mjs",
+    "smoke:backend:live": "set WECHAT_ASSISTANT_SMOKE_LIVE_DATA=1&& node scripts/smoke-backend.mjs",
+    "smoke:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/smoke-desktop.ps1",
+    "build:frontend": "npm --prefix ../frontend run build",
+    "dev": "npm run build:frontend && electron .",
+    "dist:dir": "npm run build:frontend && electron-builder --dir --win --x64",
+    "dist": "npm run build:frontend && electron-builder --win nsis --x64",
+    "dist:package:dir": "electron-builder --dir --win --x64",
+    "dist:package": "electron-builder --win nsis --x64",
+    "dist:installer:prepackaged": "electron-builder --win nsis --x64 --prepackaged dist-electron/win-unpacked"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
+  },
+  "devDependencies": {
+    "@electron/fuses": "1.8.0",
+    "electron": "43.1.1",
+    "electron-builder": "26.15.3"
+  },
+  "overrides": {
+    "js-yaml": "4.3.2",
+    "brace-expansion@<2": "1.1.18",
+    "brace-expansion@>=2 <3": "2.1.4",
+    "brace-expansion@>=4 <6": "5.0.9",
+    "fast-uri@>=3 <4": "3.1.6",
+    "tar@>=7 <8": "7.5.22",
+    "undici@>=6 <7": "6.28.0",
+    "undici@>=7 <8": "7.29.0"
+  },
+  "build": {
+    "appId": "com.wechatanalysisassistant.desktop",
+    "productName": "微信解析助手",
+    "artifactName": "WechatAnalysisAssistant-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "grantFileProtocolExtraPrivileges": false
+    },
+    "extraResources": [
+      {
+        "from": "../frontend/dist",
+        "to": "frontend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/backend/WechatAnalysisAssistantBackend",
+        "to": "backend/WechatAnalysisAssistantBackend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "../LICENSE",
+        "to": "LICENSE.wechat-analysis-assistant.txt"
+      },
+      {
+        "from": "node_modules",
+        "to": "THIRD_PARTY_LICENSES/electron-node",
+        "filter": [
+          "argparse/LICENSE",
+          "builder-util-runtime/LICENSE",
+          "debug/LICENSE",
+          "electron-updater/LICENSE",
+          "electron-updater/node_modules/semver/LICENSE",
+          "fs-extra/LICENSE",
+          "graceful-fs/LICENSE",
+          "js-yaml/LICENSE",
+          "jsonfile/LICENSE",
+          "lazy-val/package.json",
+          "lodash.escaperegexp/LICENSE",
+          "lodash.isequal/LICENSE",
+          "ms/license.md",
+          "sax/LICENSE.md",
+          "tiny-typed-emitter/LICENSE",
+          "universalify/LICENSE"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "微信解析助手",
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Magicapple-Coder",
+        "repo": "WechatAnalysisAssistant"
+      }
+    ],
+    "generateUpdatesFilesForAllChannels": true
+  }
+}

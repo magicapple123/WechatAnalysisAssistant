@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "approved_bundles": [],
+  "status": "blocked",
+  "reviewed_on": "2026-08-27",
+  "reason": "The PyAV 18.0.0 Windows wheel is not approved for public redistribution. See THIRD_PARTY_NOTICES.md."
+}

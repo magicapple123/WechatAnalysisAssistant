@@ -1,0 +1,18 @@
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn[standard]==0.34.0
+pymem==1.13.0
+pycryptodome>=3.23.0
+pefile>=2024.8.26
+yara-python>=4.5.2
+psutil>=7.0.0
+aiofiles==24.1.0
+python-multipart==0.0.32
+Pillow>=11.3
+# HEIC/HEIF sticker decoding; Pillow 11.3+ Windows wheels provide AVIF support.
+# The supported runtime baseline is Python 3.10+, so no legacy branch is needed.
+pillow-heif==1.4.0
+pywin32>=306
+av>=14.0.0,<19
+silk-python==0.2.8
+zstandard>=0.23.0
