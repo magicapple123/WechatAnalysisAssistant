@@ -13,6 +13,6 @@ Pillow>=11.3
 # The supported runtime baseline is Python 3.10+, so no legacy branch is needed.
 pillow-heif==1.4.0
 pywin32>=306
-av>=14.0.0,<19
+av>=18.1.0,<19
 silk-python==0.2.8
 zstandard>=0.23.0
