@@ -734,7 +734,13 @@ class ChatExporter:
         for msg in messages:
             ts = msg.get("create_time", 0)
             if ts:
-                date_str = datetime.fromtimestamp(ts).strftime("%Y年%m月%d日")
+                date = datetime.fromtimestamp(ts)
+                # Windows strftime encodes its format through the active C
+                # locale on older Python versions. Keep non-ASCII separators
+                # outside strftime so exports also work under cp1252 runners.
+                date_str = (
+                    f"{date.year:04d}年{date.month:02d}月{date.day:02d}日"
+                )
             else:
                 date_str = ""
             if date_str != current_date:

@@ -80,7 +80,7 @@ class WeChatAccount:
                     return f"昨天 {dt.strftime('%H:%M')}"
                 elif (now - dt).days < 7:
                     return f"{(now-dt).days}天前"
-                return dt.strftime("%m月%d日")
+                return f"{dt.month:02d}月{dt.day:02d}日"
         except Exception:
             pass
         return ""

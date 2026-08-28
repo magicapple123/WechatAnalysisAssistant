@@ -66,7 +66,11 @@ class PublicRedistributionCheckTests(unittest.TestCase):
                 [bundle_root], policy_path=policy_path
             )
 
-            self.assertEqual(observed, [avcodec])
+            self.assertEqual(len(observed), 1)
+            # GitHub's Windows runner exposes TEMP through an 8.3 path while
+            # Path.resolve() expands it. Compare filesystem identity instead
+            # of two spellings of the same file.
+            self.assertTrue(observed[0].samefile(avcodec))
 
     def test_gpl_codecs_and_unpinned_toolchain_runtimes_are_blocked(self) -> None:
         names = (

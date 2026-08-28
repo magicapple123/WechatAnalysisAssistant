@@ -1545,7 +1545,9 @@ def _finish_analysis_report(
         return saved_path, ""
     except Exception as exc:
         _discard_analysis_report_reservation(destination)
-        print(f"[AI 分析] 报告自动保存失败: {type(exc).__name__}")
+        # Keep diagnostic output ASCII-safe: a failed log write must never
+        # discard the already generated report on a legacy Windows console.
+        print(f"[AI analysis] report auto-save failed: {type(exc).__name__}")
         return None, _ANALYSIS_REPORT_SAVE_WARNING
 
 
@@ -5363,8 +5365,8 @@ async def export_moments(
             "parse_failures": int(getattr(service, "parse_failures", 0)),
         })
         print(
-            f"[朋友圈导出] 已保存到: {dest_path} "
-            f"({result.contact_count} 位联系人, {result.post_count} 条动态)"
+            f"[Moments export] saved {result.contact_count} contact(s) and "
+            f"{result.post_count} post(s)"
         )
         return payload
     except MomentsSelectionError as exc:

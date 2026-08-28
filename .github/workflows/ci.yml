@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # GitHub's Windows runners otherwise inherit cp1252, while the application
+  # and its Chinese export/log text are UTF-8 throughout.
+  PYTHONUTF8: '1'
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

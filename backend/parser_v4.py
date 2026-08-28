@@ -2224,7 +2224,7 @@ def _fmt_date(ts) -> str:
         elif (now - dt).days == 1:
             return "昨天"
         elif dt.year == now.year:
-            return dt.strftime("%m月%d日")
-        return dt.strftime("%Y年%m月%d日")
+            return f"{dt.month:02d}月{dt.day:02d}日"
+        return f"{dt.year:04d}年{dt.month:02d}月{dt.day:02d}日"
     except Exception:
         return str(ts)

@@ -46,7 +46,17 @@ $SecretSignatures = [ordered]@{
 $Violations = [System.Collections.Generic.HashSet[string]]::new(
     [System.StringComparer]::OrdinalIgnoreCase
 )
-$GitExecutable = (Get-Command git.exe -ErrorAction Stop).Source
+$GitCommand = (Get-Command git.exe -ErrorAction Stop).Source
+$GitExecutable = $GitCommand
+# Git for Windows exposes a small cmd/git.exe launcher. That launcher starts a
+# second git.exe process which can keep redirected standard handles open after
+# the real command exits, so direct binary/stream reads would wait forever.
+# Prefer the adjacent native executable whenever the launcher layout is used.
+$gitRoot = Split-Path -Parent (Split-Path -Parent $GitCommand)
+$nativeGitCandidate = Join-Path $gitRoot "mingw64\bin\git.exe"
+if (Test-Path -LiteralPath $nativeGitCandidate -PathType Leaf) {
+    $GitExecutable = $nativeGitCandidate
+}
 
 function Get-PathViolation {
     param([Parameter(Mandatory = $true)][string] $RelativePath)
@@ -139,6 +149,87 @@ function Read-GitBlobBytes {
     }
 }
 
+function Get-GitObjectInformation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]] $ObjectIds
+    )
+
+    if ($ObjectIds.Count -eq 0) {
+        return
+    }
+
+    # Do not pipe a PowerShell string array into Git here. Windows PowerShell
+    # and newer Git releases have disagreed about the native-pipeline encoding
+    # in hosted runners, which can prepend a BOM to the first object id. Feed
+    # the ASCII ids through redirected stdin so --batch-check is deterministic.
+    # A redirected Windows pipe can be only a few KiB. Keep each request below
+    # that bound so Git cannot block on stdout while PowerShell is still
+    # writing stdin (a classic two-pipe deadlock).
+    $batchSize = 32
+    for ($offset = 0; $offset -lt $ObjectIds.Count; $offset += $batchSize) {
+        $lastIndex = [Math]::Min(
+            $offset + $batchSize - 1,
+            $ObjectIds.Count - 1
+        )
+        $batchIds = @($ObjectIds[$offset..$lastIndex])
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $GitExecutable
+        $startInfo.Arguments = "cat-file --batch-check"
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        try {
+            if (-not $process.Start()) {
+                throw "Unable to start Git object metadata reader."
+            }
+            foreach ($objectId in $batchIds) {
+                if ($objectId -notmatch '^[0-9a-f]+$') {
+                    throw "Git returned an invalid object identifier."
+                }
+                $process.StandardInput.WriteLine("${objectId}^{object}")
+            }
+            $process.StandardInput.Close()
+            $standardOutput = $process.StandardOutput.ReadToEnd()
+            $standardError = $process.StandardError.ReadToEnd()
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0) {
+                # Deliberately keep Git stderr private: publication checks
+                # should never echo content-derived diagnostics or credentials.
+                [void]$standardError
+                throw "Unable to inspect reachable Git object types."
+            }
+
+            $lines = @(
+                $standardOutput -split '\r?\n' |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            )
+            if ($lines.Count -ne $batchIds.Count) {
+                throw "Git returned incomplete object metadata."
+            }
+            for ($index = 0; $index -lt $lines.Count; $index++) {
+                if (
+                    $lines[$index] -notmatch
+                        '^(?<id>[0-9a-f]+) (?<type>\S+) (?<size>\d+)$'
+                ) {
+                    throw "Git returned unexpected object metadata."
+                }
+                Write-Output (
+                    "$($batchIds[$index]) $($Matches.type) $($Matches.size)"
+                )
+            }
+        }
+        finally {
+            $process.Dispose()
+        }
+    }
+}
+
 Push-Location $ProjectRoot
 try {
     $trackedFiles = @(& git ls-files)
@@ -194,13 +285,7 @@ try {
         $historyRecords |
             Select-Object -ExpandProperty ObjectId -Unique
     )
-    $batchInformation = @(
-        $objectIds |
-            & $GitExecutable cat-file '--batch-check=%(objectname) %(objecttype) %(objectsize)'
-    )
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to inspect reachable Git object types."
-    }
+    $batchInformation = @(Get-GitObjectInformation -ObjectIds $objectIds)
     $objectInformation = @{}
     foreach ($informationLine in $batchInformation) {
         if ($informationLine -notmatch '^(?<id>[0-9a-f]+) (?<type>\S+) (?<size>\d+)$') {
