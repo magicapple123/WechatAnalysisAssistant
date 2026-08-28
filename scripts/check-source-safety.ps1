@@ -192,9 +192,19 @@ function Get-GitObjectInformation {
                 if ($objectId -notmatch '^[0-9a-f]+$') {
                     throw "Git returned an invalid object identifier."
                 }
-                $process.StandardInput.WriteLine("${objectId}^{object}")
             }
-            $process.StandardInput.Close()
+            # Process.StandardInput inherits the host console encoding under
+            # Windows PowerShell 5.1. On GitHub runners its StreamWriter may
+            # emit a UTF-8 BOM before the first write. A disposable first query
+            # absorbs that preamble; all security-relevant full object ids then
+            # remain ASCII and unambiguous.
+            $inputLines = @("HEAD") + $batchIds
+            $inputText = ($inputLines -join "`n") + "`n"
+            $inputBytes = [System.Text.Encoding]::ASCII.GetBytes($inputText)
+            $inputStream = $process.StandardInput.BaseStream
+            $inputStream.Write($inputBytes, 0, $inputBytes.Length)
+            $inputStream.Flush()
+            $inputStream.Close()
             $standardOutput = $process.StandardOutput.ReadToEnd()
             $standardError = $process.StandardError.ReadToEnd()
             $process.WaitForExit()
@@ -205,13 +215,14 @@ function Get-GitObjectInformation {
                 throw "Unable to inspect reachable Git object types."
             }
 
-            $lines = @(
+            $rawLines = @(
                 $standardOutput -split '\r?\n' |
                     Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
             )
-            if ($lines.Count -ne $batchIds.Count) {
+            if ($rawLines.Count -ne $batchIds.Count + 1) {
                 throw "Git returned incomplete object metadata."
             }
+            $lines = @($rawLines | Select-Object -Skip 1)
             for ($index = 0; $index -lt $lines.Count; $index++) {
                 if (
                     $lines[$index] -notmatch
