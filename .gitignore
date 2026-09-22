@@ -75,3 +75,6 @@ temp/
 
 # Local agent workspace data
 .workbuddy/
+
+# 演示数据与隔离运行时（可随时删除重新生成）
+runtime/
