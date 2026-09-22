@@ -175,6 +175,14 @@ npm test --prefix desktop                          # Electron 测试
 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)——不要在公开
 Issue 中粘贴聊天记录、密钥或未脱敏日志，未修复的漏洞请按安全策略私下报告。
 
+## ⭐ Star 历史
+
+[![Star History Chart](https://api.star-history.com/svg?repos=magicapple123/WechatAnalysisAssistant&type=Date)](https://star-history.com/#magicapple123/WechatAnalysisAssistant&Date)
+
+如果这个项目对你有帮助，欢迎点一个 Star，或在
+[Discussions](https://github.com/magicapple123/WechatAnalysisAssistant/discussions)
+分享你的使用场景与建议——功能优先级会参考真实反馈排序。
+
 ## 📄 许可证
 
 项目源码按 [MIT License](LICENSE) 发布；第三方依赖遵循各自许可证，
