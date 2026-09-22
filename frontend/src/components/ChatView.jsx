@@ -2600,6 +2600,9 @@ export default function ChatView({
     setRecognitionError('');
     setStartingRecognition(false);
     setShowHdAutomationDialog(false);
+    // 故意不清 hdAutomationTask / hdAutomationPollTimerRef：高清自动化是后台全局
+    // 任务（热键驱动微信翻页，与本页浏览无关），进度条按设计跨会话常驻；组件
+    // 重新挂载时由 getActiveHdImageAutomationTask() 恢复。切换会话不清轮询。
     setHdAutomationError('');
     setStartingHdAutomation(false);
     setPausingHdAutomation(false);
@@ -2618,6 +2621,7 @@ export default function ChatView({
     }
     if (recognitionPollTimerRef.current) clearTimeout(recognitionPollTimerRef.current);
     if (transcriptionPollTimerRef.current) clearTimeout(transcriptionPollTimerRef.current);
+    // hdAutomationPollTimerRef 同样不清：全局任务进度条需跨会话持续轮询（见上方注释）
     isFirstLoad.current = true;
     lastPageRef.current = 0;
     scrollRestoreRef.current = 0;
@@ -3155,7 +3159,8 @@ export default function ChatView({
     const parts = content.split(urlRegex);
 
     return parts.map((part, i) => {
-      if (urlRegex.test(part)) {
+      // split 的捕获组返回的 URL 段必以协议开头；用非全局正则避免 /g 的 lastIndex 状态污染
+      if (/^https?:\/\//.test(part)) {
         return (
           <a
             key={i}

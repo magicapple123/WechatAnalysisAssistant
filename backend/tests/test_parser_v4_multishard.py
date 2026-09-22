@@ -558,6 +558,70 @@ class ParserV4MultiShardTests(unittest.TestCase):
         self.assertIn("[转账]", contact["last_message"])
         self.assertIn("¥6.66", contact["last_message"])
 
+    def test_get_contacts_is_cached_and_returns_isolated_copies(self):
+        talker = "wxid_friend"
+        shard = make_shard(
+            talker,
+            [(1, 101, 1, 10, 100, "hello", b"", b"", 0)],
+        )
+        self.addCleanup(shard.close)
+        parser = MessageParserV4([shard], None, "wxid_self", None)
+
+        first = parser.get_contacts()
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["talker"], talker)
+
+        # 调用方对返回值的修改（列表与字典两层）不得污染缓存
+        first.append({"talker": "intruder"})
+        first[0]["last_message"] = "mutated"
+        second = parser.get_contacts()
+        self.assertEqual(len(second), 1)
+        self.assertEqual(second[0]["talker"], talker)
+        self.assertNotEqual(second[0]["last_message"], "mutated")
+
+        # 缓存生效：两次调用内容一致
+        self.assertEqual(
+            [dict(item) for item in second],
+            [dict(item) for item in parser.get_contacts()],
+        )
+
+    def test_get_messages_reverse_and_total_cache(self):
+        talker = "wxid_friend"
+        shard_a = make_shard(
+            talker,
+            [(1, 101, 1, 10, 100, "first", b"", b"", 0)],
+        )
+        shard_b = make_shard(
+            talker,
+            [(2, 102, 1, 10, 300, "newest", b"", b"", 0)],
+        )
+        self.addCleanup(shard_a.close)
+        self.addCleanup(shard_b.close)
+        parser = MessageParserV4([shard_a, shard_b], None, "wxid_self", None)
+
+        forward = parser.get_messages(talker, page=1, page_size=10)
+        self.assertEqual(forward["total"], 2)
+        self.assertEqual([m["id"] for m in forward["messages"]], [1, 2])
+
+        # 反向第 1 页 = 最新一条（无需深页候选加载）
+        newest = parser.get_messages(talker, page=1, page_size=1, reverse=True)
+        self.assertEqual(newest["total"], 2)
+        self.assertEqual([m["id"] for m in newest["messages"]], [2])
+
+        # 反向第 2 页 = 最旧一条
+        oldest = parser.get_messages(talker, page=2, page_size=1, reverse=True)
+        self.assertEqual([m["id"] for m in oldest["messages"]], [1])
+
+        # 计数缓存命中：同过滤条件第二次调用 total 一致
+        again = parser.get_messages(talker, page=1, page_size=10)
+        self.assertEqual(again["total"], 2)
+        self.assertEqual([m["id"] for m in again["messages"]], [1, 2])
+
+        # 不同过滤条件各自缓存（互不污染）
+        filtered = parser.get_messages(talker, page=1, page_size=10, msg_type=1)
+        self.assertEqual(filtered["total"], 2)
+        self.assertEqual(parser.get_messages(talker, page=1, page_size=10)["total"], 2)
+
     def test_server_id_lookup_crosses_shards_and_uses_time_tiebreaker(self):
         talker = "wxid_friend"
         shard_a = make_shard(

@@ -1,10 +1,13 @@
 import hashlib
 import hmac
 import os
+import sqlite3
 import struct
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from Crypto.Cipher import AES
 
@@ -65,6 +68,51 @@ class EncryptedWalTests(unittest.TestCase):
                 decrypted[len(SQLITE_HEADER):PAGE_SIZE - PAGE_RESERVE],
                 plain,
             )
+
+    def test_open_decrypted_connection_allows_cross_thread_use(self):
+        """同步路由在线程池中执行，缓存的解密连接必须允许跨线程使用。
+
+        回归测试：``open_decrypted`` 若缺少 ``check_same_thread=False``，
+        解析器连接在事件循环/某个工作线程创建后，其他线程使用即抛
+        ``sqlite3.ProgrammingError``。
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plain_db = root / "plain.db"
+            setup = sqlite3.connect(plain_db)
+            try:
+                setup.execute("CREATE TABLE sample (value INTEGER)")
+                setup.execute("INSERT INTO sample VALUES (42)")
+                setup.commit()
+            finally:
+                setup.close()
+
+            placeholder = root / "message_0.db"
+            placeholder.write_bytes(b"\x00" * 16)
+            decryptor = DatabaseDecryptor(placeholder, "ab" * 32)
+            try:
+                with mock.patch.object(
+                    decryptor, "decrypt_to_temp", return_value=plain_db
+                ):
+                    conn = decryptor.open_decrypted()
+
+                failures = []
+
+                def worker():
+                    try:
+                        row = conn.execute("SELECT value FROM sample").fetchone()
+                        if not row or row[0] != 42:
+                            failures.append(f"unexpected row: {row!r}")
+                    except Exception as exc:  # noqa: BLE001 - 报告任意失败
+                        failures.append(repr(exc))
+
+                thread = threading.Thread(target=worker)
+                thread.start()
+                thread.join()
+                self.assertEqual(failures, [])
+            finally:
+                # 必须在 TemporaryDirectory 清理前释放 plain.db
+                decryptor.close()
 
     def test_applies_only_committed_encrypted_frames(self):
         with tempfile.TemporaryDirectory() as temporary:

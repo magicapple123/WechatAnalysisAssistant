@@ -15,6 +15,8 @@ import re
 import sqlite3
 import struct
 import tempfile
+
+from .app_paths import prune_cache_directory
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +29,10 @@ from Crypto.Util import Padding
 V2_MAGIC = b"\x07\x08V2\x08\x07"
 V1_MAGIC = b"\x07\x08V1\x08\x07"
 V1_AES_KEY = b"cfcd208495d565ef"
+# 图片解密临时缓存淘汰阈值：新写入累计超过 512MB 时按 mtime 淘汰到 256MB。
+# 缓存 fingerprint 含源文件 mtime，被淘汰的副本下次访问会自动重建。
+IMAGE_CACHE_PRUNE_THRESHOLD = 512 * 1024 * 1024
+IMAGE_CACHE_PRUNE_TARGET = 256 * 1024 * 1024
 
 
 class ImageResolutionError(RuntimeError):
@@ -318,6 +324,7 @@ class WeChatImageService:
         self.cache_dir = Path(self._tmp.name)
         self._lock = threading.RLock()
         self._resolution_cache: dict[tuple, tuple[str, list[Path]]] = {}
+        self._cache_bytes_pending = 0
 
     def close(self) -> None:
         with self._lock:
@@ -535,6 +542,16 @@ class WeChatImageService:
                                 handle.flush()
                                 os.fsync(handle.fileno())
                             os.replace(temporary_name, output_path)
+                            # 阈值触发：会话内滚动大量图片时淘汰最旧的解密副本
+                            self._cache_bytes_pending += len(decoded)
+                            if (
+                                self._cache_bytes_pending
+                                >= IMAGE_CACHE_PRUNE_THRESHOLD
+                            ):
+                                self._cache_bytes_pending = 0
+                                prune_cache_directory(
+                                    self.cache_dir, IMAGE_CACHE_PRUNE_TARGET
+                                )
                         finally:
                             try:
                                 Path(temporary_name).unlink()

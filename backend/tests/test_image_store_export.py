@@ -243,9 +243,9 @@ class ExportRouteValidationTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(api, "get_parser") as get_parser:
             with self.assertRaises(HTTPException) as single_rejected:
-                await api.export_chat(request)
+                api.export_chat(request)
             with self.assertRaises(HTTPException) as all_rejected:
-                await api.export_all(fmt="pdf")
+                api.export_all(fmt="pdf")
 
         self.assertEqual(single_rejected.exception.status_code, 400)
         self.assertEqual(all_rejected.exception.status_code, 400)

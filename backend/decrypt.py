@@ -16,6 +16,7 @@ import hashlib
 import hmac as hmac_lib
 import sqlite3
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -51,6 +52,10 @@ class DatabaseDecryptor:
         self.key = key.strip().lower()
         self._decrypted_path: Optional[Path] = None
         self._conn: Optional[sqlite3.Connection] = None
+        # 解密与开连接都是重活且非原子：两个线程同时触发会对同一临时文件
+        # 双写（产生损坏的明文库）或双开连接。RLock 允许 open_decrypted
+        # 持锁调用 decrypt_to_temp。
+        self._lock = threading.RLock()
 
     @property
     def raw_pass(self) -> bytes:
@@ -66,40 +71,41 @@ class DatabaseDecryptor:
 
     def decrypt_to_temp(self) -> Path:
         """解密数据库到临时文件"""
-        if self._decrypted_path and self._decrypted_path.exists():
-            return self._decrypted_path
+        with self._lock:
+            if self._decrypted_path and self._decrypted_path.exists():
+                return self._decrypted_path
 
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            suffix=".db",
-            prefix=f"wechat_db_{os.getpid()}_",
-        )
-        os.close(tmp_fd)
-        self._decrypted_path = Path(tmp_path)
-
-        try:
-            # 微信 4.x WCDB 逐页解密
-            if HAS_CRYPTO and len(self.key) == 64:
-                if self._decrypt_wcdb():
-                    try:
-                        self._apply_encrypted_wal()
-                    except (OSError, ValueError, struct.error):
-                        # The live WAL may rotate while being copied.  The main
-                        # DB remains valid and is preferable to failing the
-                        # feature.
-                        pass
-                    return self._decrypted_path
-
-            raise RuntimeError(
-                "数据库解密失败。请检查:\n"
-                "1. 密钥是否正确 (64位十六进制)\n"
-                "2. 数据库是否来自受支持的微信 4.x 版本\n"
-                "3. 依赖是否安装: pip install pycryptodome"
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                suffix=".db",
+                prefix=f"wechat_db_{os.getpid()}_",
             )
-        except BaseException:
-            # Failed attempts must not accumulate empty or partially decrypted
-            # databases containing private chat data in the system temp dir.
-            self._discard_decrypted_file()
-            raise
+            os.close(tmp_fd)
+            self._decrypted_path = Path(tmp_path)
+
+            try:
+                # 微信 4.x WCDB 逐页解密
+                if HAS_CRYPTO and len(self.key) == 64:
+                    if self._decrypt_wcdb():
+                        try:
+                            self._apply_encrypted_wal()
+                        except (OSError, ValueError, struct.error):
+                            # The live WAL may rotate while being copied.  The main
+                            # DB remains valid and is preferable to failing the
+                            # feature.
+                            pass
+                        return self._decrypted_path
+
+                raise RuntimeError(
+                    "数据库解密失败。请检查:\n"
+                    "1. 密钥是否正确 (64位十六进制)\n"
+                    "2. 数据库是否来自受支持的微信 4.x 版本\n"
+                    "3. 依赖是否安装: pip install pycryptodome"
+                )
+            except BaseException:
+                # Failed attempts must not accumulate empty or partially decrypted
+                # databases containing private chat data in the system temp dir.
+                self._discard_decrypted_file()
+                raise
 
     def _derive_wcdb_encryption_key(self) -> bytes:
         with open(self.db_path, "rb") as handle:
@@ -296,13 +302,19 @@ class DatabaseDecryptor:
 
     def open_decrypted(self) -> sqlite3.Connection:
         """打开解密后的数据库连接"""
-        if self._conn:
-            return self._conn
+        with self._lock:
+            if self._conn:
+                return self._conn
 
-        decrypted_path = self.decrypt_to_temp()
-        self._conn = sqlite3.connect(str(decrypted_path))
-        self._conn.row_factory = sqlite3.Row
-        return self._conn
+            decrypted_path = self.decrypt_to_temp()
+            # 连接会被缓存并跨线程复用（FastAPI 将同步路由放入线程池执行，图片/表情
+            # 服务也通过 asyncio.to_thread 调用）；CPython 的 sqlite3 模块在序列化
+            # 模式下会保护语句级执行，跨线程使用是安全的。
+            self._conn = sqlite3.connect(
+                str(decrypted_path), check_same_thread=False
+            )
+            self._conn.row_factory = sqlite3.Row
+            return self._conn
 
     def _discard_decrypted_file(self) -> None:
         path = self._decrypted_path
@@ -315,10 +327,11 @@ class DatabaseDecryptor:
             pass
 
     def close(self):
-        if self._conn:
-            self._conn.close()
-            self._conn = None
-        self._discard_decrypted_file()
+        with self._lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
+            self._discard_decrypted_file()
 
     def __enter__(self):
         return self.open_decrypted()

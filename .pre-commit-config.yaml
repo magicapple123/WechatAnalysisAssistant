@@ -1,0 +1,13 @@
+# 本地提交前自动检查，规则与 CI（.github/workflows/ci.yml）的 ruff 步骤保持一致。
+# 首次启用：pip install pre-commit && pre-commit install
+# 手动全量检查：pre-commit run --all-files
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.4   # 与 backend/requirements-dev.txt 的 ruff 版本保持一致
+    hooks:
+      - id: ruff
+        args: ["--select", "F,E9"]
+      - id: ruff-format
+        # 统一格式化属一次性大改动，默认不启用；需要时手动执行：
+        # pre-commit run ruff-format --all-files --hook-stage manual
+        stages: [manual]

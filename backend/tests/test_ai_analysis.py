@@ -1,6 +1,8 @@
 import io
 import json
+import re
 import threading
+import time
 import unittest
 import urllib.error
 
@@ -642,6 +644,65 @@ class MapReduceTests(unittest.TestCase):
         self.assertGreater(
             result.metadata["request_count"], result.metadata["chunk_count"] + 1
         )
+
+    def test_map_phase_runs_in_parallel_and_preserves_summary_order(self):
+        lock = threading.Lock()
+        state = {
+            "active": 0,
+            "max_active": 0,
+            "map_indexes": [],
+            "prompts": [],
+        }
+
+        class ConcurrencyProbeClient:
+            def complete(
+                self,
+                system_prompt,
+                user_prompt,
+                *,
+                max_output_tokens=None,
+                source_type="text",
+                strength=None,
+                detail_level=None,
+            ):
+                with lock:
+                    state["prompts"].append(user_prompt)
+                match = re.search(r"请分析第 (\d+)/", user_prompt)
+                if match:
+                    index = int(match.group(1))
+                    with lock:
+                        state["map_indexes"].append(index)
+                        state["active"] += 1
+                        state["max_active"] = max(
+                            state["max_active"], state["active"]
+                        )
+                    time.sleep(0.05)
+                    with lock:
+                        state["active"] -= 1
+                    return f"分块{index}摘要。"
+                if "合并成一个更紧凑" in user_prompt:
+                    return "归并后的跨分块事实。"
+                return "# 分析报告\n\n完成"
+
+        text = "\n".join(("记录内容" * 200) for _ in range(5))
+        analyze_text(
+            text,
+            make_config(chunk_chars=1000),
+            client=ConcurrencyProbeClient(),
+        )
+
+        # 覆盖并行路径：map 阶段分块数多于 1
+        self.assertGreater(len(state["map_indexes"]), 1)
+        # 并行证明：存在并发中的请求（串行实现 max_active 恒为 1）
+        self.assertGreaterEqual(state["max_active"], 2)
+        # 保序：最终报告 prompt 中各分块摘要按 1..N 升序出现
+        final_prompt = state["prompts"][-1]
+        positions = [
+            final_prompt.find(f"分块{index}摘要")
+            for index in range(1, len(state["map_indexes"]) + 1)
+        ]
+        self.assertTrue(all(position >= 0 for position in positions))
+        self.assertEqual(positions, sorted(positions))
 
     def test_input_report_and_metadata_boundaries_are_enforced(self):
         client = RecordingClient()

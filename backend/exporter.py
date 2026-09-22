@@ -10,6 +10,7 @@
 import json
 import csv
 import base64
+import logging
 import re
 import zipfile
 from pathlib import Path
@@ -21,6 +22,8 @@ from .time_utils import format_timestamp
 from .image_store import ImageDescriptionStore
 from .image_service import ImageResolutionError, WeChatImageService
 from .voice_store import VoiceTranscriptionStore
+
+logger = logging.getLogger(__name__)
 
 
 class ChatExporter:
@@ -57,6 +60,8 @@ class ChatExporter:
         replace_voices_with_transcriptions: bool = False,
         embed_images: bool = True,
         html_image_quality: str = "best",
+        target_dir: Optional[Path] = None,
+        safe_name: Optional[str] = None,
     ) -> Path:
         """
         导出单个聊天的消息
@@ -68,6 +73,8 @@ class ChatExporter:
             start_time: 起始时间 (Unix 时间戳)
             end_time: 结束时间 (Unix 时间戳)
             message_ids: 指定消息 ID 列表
+            target_dir: 目标目录；缺省写入 self.output_dir（批量导出时传子目录）
+            safe_name: 文件名主干；缺省由 display_name 推导（批量导出时由调用方去重）
 
         Returns:
             导出文件路径
@@ -137,34 +144,45 @@ class ChatExporter:
         )
         all_messages = self._prepare_voice_transcriptions(all_messages, talker)
 
-        # 按格式导出
-        safe_name = _safe_filename(display_name)
+        # 按格式导出；批量导出时由调用方指定目标目录与去重后的文件名
+        resolved_target = Path(target_dir) if target_dir else self.output_dir
+        resolved_safe_name = (
+            str(safe_name).strip() if safe_name else ""
+        ) or _safe_filename(display_name)
 
         if fmt == "html":
             return self._export_html(
                 all_messages,
                 display_name,
                 talker,
-                safe_name,
+                resolved_safe_name,
                 embed_images=embed_images and not replace_images_with_descriptions,
                 image_quality=html_image_quality,
                 replace_voices=replace_voices_with_transcriptions,
+                target_dir=resolved_target,
             )
         elif fmt == "json":
-            return self._export_json(all_messages, display_name, safe_name)
+            return self._export_json(
+                all_messages,
+                display_name,
+                resolved_safe_name,
+                target_dir=resolved_target,
+            )
         elif fmt == "csv":
             return self._export_csv(
                 all_messages,
                 display_name,
-                safe_name,
+                resolved_safe_name,
                 replace_voices=replace_voices_with_transcriptions,
+                target_dir=resolved_target,
             )
         elif fmt == "txt":
             return self._export_txt(
                 all_messages,
                 display_name,
-                safe_name,
+                resolved_safe_name,
                 replace_voices=replace_voices_with_transcriptions,
+                target_dir=resolved_target,
             )
         raise AssertionError("validated export format was not dispatched")
 
@@ -225,12 +243,12 @@ class ChatExporter:
         replace_voices_with_transcriptions: bool = False,
         embed_images: bool = True,
         html_image_quality: str = "best",
-    ) -> Path:
+    ) -> tuple[Path, list[dict]]:
         """
         导出所有聊天记录
 
         Returns:
-            包含所有导出文件的目录路径，或压缩包路径
+            (压缩包路径, 失败聊天清单)；失败项包含 talker / display_name / error
         """
         fmt = str(fmt or "").strip().lower()
         if fmt not in {"html", "json", "csv", "txt"}:
@@ -241,20 +259,44 @@ class ChatExporter:
         export_subdir.mkdir(parents=True, exist_ok=True)
 
         exported_files = []
+        failed_chats: list[dict] = []
+        used_stems: dict[str, int] = {}
         for contact in contacts:
+            display_name = str(
+                contact.get("display_name") or contact.get("talker") or "chat"
+            )
             try:
+                # 同名联系人（或截断后同主干）在文件系统上会互相覆盖，追加序号去重
+                base_stem = _safe_filename(display_name)
+                seen = used_stems.get(base_stem, 0)
+                used_stems[base_stem] = seen + 1
+                stem = base_stem if seen == 0 else f"{base_stem}_{seen + 1}"
                 filepath = self.export_chat(
                     contact["talker"],
-                    contact["display_name"],
+                    display_name,
                     fmt=fmt,
                     replace_images_with_descriptions=replace_images_with_descriptions,
                     replace_voices_with_transcriptions=replace_voices_with_transcriptions,
                     embed_images=embed_images,
                     html_image_quality=html_image_quality,
+                    target_dir=export_subdir,
+                    safe_name=stem,
                 )
                 exported_files.append(filepath)
-            except Exception as e:
-                print(f"[ERROR] 导出失败 {contact['display_name']}: {e}")
+            except Exception as exc:
+                logger.warning(
+                    "导出聊天失败 %s (talker=%s): %s",
+                    display_name,
+                    contact.get("talker"),
+                    exc,
+                )
+                failed_chats.append(
+                    {
+                        "talker": str(contact.get("talker") or ""),
+                        "display_name": display_name,
+                        "error": str(exc),
+                    }
+                )
 
         # 创建索引文件
         self._create_index_html(contacts, export_subdir)
@@ -269,7 +311,7 @@ class ChatExporter:
             if index_file.exists():
                 zf.write(index_file, "index.html")
 
-        return zip_path
+        return zip_path, failed_chats
 
     def _prepare_image_descriptions(
         self,
@@ -377,76 +419,18 @@ class ChatExporter:
         embed_images: bool = True,
         image_quality: str = "best",
         replace_voices: bool = False,
+        target_dir: Optional[Path] = None,
     ) -> Path:
         """导出为 HTML 格式"""
         if image_quality not in ("thumbnail", "best"):
             raise ValueError("HTML 图片清晰度必须是 thumbnail 或 best")
-        filepath = self.output_dir / f"{safe_name}.html"
+        dest_dir = Path(target_dir) if target_dir else self.output_dir
+        filepath = dest_dir / f"{safe_name}.html"
 
-        messages_html = []
-        current_date = ""
-
-        for msg in messages:
-            # 日期分隔符
-            date_str = msg.get("date_str", "")
-            if date_str != current_date:
-                current_date = date_str
-                messages_html.append(
-                    f'<div class="date-divider"><span>{current_date}</span></div>'
-                )
-
-            # 消息气泡
-            css_class = "message-self" if msg["is_sender"] else "message-other"
-            time_str = format_timestamp(msg["create_time"])[-8:] if msg.get("create_time") else ""
-
-            display_content = self._voice_export_content(
-                msg,
-                replace=replace_voices,
-            )
-            content = _escape_html(display_content).replace("\n", "<br>")
-            try:
-                is_image = (int(msg.get("type") or 0) & 0xFFFFFFFF) in (2, 3)
-            except (TypeError, ValueError):
-                is_image = False
-            if is_image and embed_images:
-                content = self._embedded_image_html(
-                    talker,
-                    msg,
-                    image_quality=image_quality,
-                    fallback=content,
-                )
-
-            # 语音消息：未替换时仍展示已有转写文字
-            transcription_html = ""
-            if (
-                not replace_voices
-                and self._is_voice_message(msg)
-                and str(msg.get("voice_transcription") or "").strip()
-            ):
-                transcription_html = (
-                    '<div class="voice-transcription">'
-                    f"语音转写：{_escape_html(str(msg['voice_transcription']).strip())}"
-                    "</div>"
-                )
-
-            # 群聊发送者名称
-            sender_html = ""
-            sender_name = msg.get("sender_name", "")
-            if sender_name and not msg["is_sender"]:
-                sender_html = f'<div class="sender-name">{_escape_html(sender_name)}</div>'
-
-            messages_html.append(f"""
-            <div class="{css_class}">
-                <div class="message-bubble">
-                    {sender_html}
-                    <div class="message-content">{content}</div>
-                    {transcription_html}
-                    <div class="message-time">{time_str}</div>
-                </div>
-            </div>
-            """)
-
-        html = f"""<!DOCTYPE html>
+        # 头部与消息内容拆分为流式写入：逐条写出片段，避免大聊天导出时
+        # 在内存中同时持有「片段列表 + 完整 HTML + 写盘副本」多份拷贝
+        # （base64 内嵌图片占大头）。单文件内嵌语义保持不变。
+        header = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -579,8 +563,9 @@ class ChatExporter:
 <body>
     <div class="chat-container">
         <div class="chat-header">与 {_escape_html(display_name)} 的聊天记录</div>
-        <div class="chat-messages">
-            {"".join(messages_html)}
+        <div class="chat-messages">"""
+
+        footer = f"""
         </div>
         <div class="chat-footer">
             共 {len(messages)} 条消息 | 导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -589,7 +574,72 @@ class ChatExporter:
 </body>
 </html>"""
 
-        filepath.write_text(html, encoding="utf-8")
+        with filepath.open("w", encoding="utf-8") as handle:
+            handle.write(header)
+            current_date = ""
+
+            for msg in messages:
+                # 日期分隔符
+                date_str = msg.get("date_str", "")
+                if date_str != current_date:
+                    current_date = date_str
+                    handle.write(
+                        f'<div class="date-divider"><span>{current_date}</span></div>'
+                    )
+
+                # 消息气泡
+                css_class = "message-self" if msg["is_sender"] else "message-other"
+                time_str = format_timestamp(msg["create_time"])[-8:] if msg.get("create_time") else ""
+
+                display_content = self._voice_export_content(
+                    msg,
+                    replace=replace_voices,
+                )
+                content = _escape_html(display_content).replace("\n", "<br>")
+                try:
+                    is_image = (int(msg.get("type") or 0) & 0xFFFFFFFF) in (2, 3)
+                except (TypeError, ValueError):
+                    is_image = False
+                if is_image and embed_images:
+                    content = self._embedded_image_html(
+                        talker,
+                        msg,
+                        image_quality=image_quality,
+                        fallback=content,
+                    )
+
+                # 语音消息：未替换时仍展示已有转写文字
+                transcription_html = ""
+                if (
+                    not replace_voices
+                    and self._is_voice_message(msg)
+                    and str(msg.get("voice_transcription") or "").strip()
+                ):
+                    transcription_html = (
+                        '<div class="voice-transcription">'
+                        f"语音转写：{_escape_html(str(msg['voice_transcription']).strip())}"
+                        "</div>"
+                    )
+
+                # 群聊发送者名称
+                sender_html = ""
+                sender_name = msg.get("sender_name", "")
+                if sender_name and not msg["is_sender"]:
+                    sender_html = f'<div class="sender-name">{_escape_html(sender_name)}</div>'
+
+                handle.write(f"""
+            <div class="{css_class}">
+                <div class="message-bubble">
+                    {sender_html}
+                    <div class="message-content">{content}</div>
+                    {transcription_html}
+                    <div class="message-time">{time_str}</div>
+                </div>
+            </div>
+            """)
+
+            handle.write(footer)
+
         return filepath
 
     def _embedded_image_html(
@@ -629,9 +679,17 @@ class ChatExporter:
             f"{description_html}</figure>"
         )
 
-    def _export_json(self, messages: list[dict], display_name: str, safe_name: str) -> Path:
+    def _export_json(
+        self,
+        messages: list[dict],
+        display_name: str,
+        safe_name: str,
+        *,
+        target_dir: Optional[Path] = None,
+    ) -> Path:
         """导出为 JSON 格式"""
-        filepath = self.output_dir / f"{safe_name}.json"
+        dest_dir = Path(target_dir) if target_dir else self.output_dir
+        filepath = dest_dir / f"{safe_name}.json"
 
         export_data = {
             "chat_name": display_name,
@@ -671,9 +729,11 @@ class ChatExporter:
         safe_name: str,
         *,
         replace_voices: bool = False,
+        target_dir: Optional[Path] = None,
     ) -> Path:
         """导出为 CSV 格式"""
-        filepath = self.output_dir / f"{safe_name}.csv"
+        dest_dir = Path(target_dir) if target_dir else self.output_dir
+        filepath = dest_dir / f"{safe_name}.csv"
 
         with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
@@ -703,9 +763,11 @@ class ChatExporter:
         safe_name: str,
         *,
         replace_voices: bool = False,
+        target_dir: Optional[Path] = None,
     ) -> Path:
         """导出为 TXT 格式"""
-        filepath = self.output_dir / f"{safe_name}.txt"
+        dest_dir = Path(target_dir) if target_dir else self.output_dir
+        filepath = dest_dir / f"{safe_name}.txt"
 
         # 计算时间范围
         timestamps = [m["create_time"] for m in messages if m.get("create_time")]

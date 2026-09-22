@@ -13,6 +13,7 @@ import hashlib
 import html
 import sqlite3
 import re
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
@@ -25,6 +26,8 @@ _BARE_AMP_RE = re.compile(
 )
 _XML_PARSE_MAX_CHARS = 512_000
 _ADDRESS_BOOK_MAX_CONTACTS = 50_000
+# 消息总数缓存的过滤条件组合上限（防止大量不同搜索关键词导致无界增长）
+_MESSAGE_TOTAL_CACHE_MAX = 128
 _CONTACT_FIELD_LIMITS = {
     "username": 256,
     "nick_name": 256,
@@ -973,6 +976,12 @@ class MessageParserV4:
         # 每个 message_N.db 的 Name2Id.rowid → 发送者 wxid。
         # real_sender_id 正是这个 rowid；直接映射比从消息正文猜测更可靠。
         self._sender_id_cache: dict[tuple, str] = {}
+        # get_contacts 结果按实例缓存：解密快照在本实例生命周期内是静态文件
+        # （仅账号切换/密钥变更时整体重建），聚合结果不可能变化。
+        self._contacts_cache: Optional[list[dict]] = None
+        self._contacts_lock = threading.Lock()
+        # 消息总数缓存：键为 (talker, 过滤条件)，静态快照下 COUNT 结果不变
+        self._message_total_cache: dict[tuple, int] = {}
         self._load_chat_names()
         self._load_sender_id_maps()
         self._discover_self_sender_ids()
@@ -1171,8 +1180,45 @@ class MessageParserV4:
         tables = self._get_msg_tables(username)
         return tables[0] if tables else None
 
+    def _get_msg_table_map(self) -> dict[str, list[tuple[sqlite3.Connection, str, int]]]:
+        """每个分片只查一次 sqlite_master，返回 {md5(user_name): [(conn, 表名, 分片序号)]}。
+
+        微信会让同一个 ``Msg_<md5>`` 表同时出现在多个 ``message_N.db`` 中，
+        因此值为列表。相比对每个联系人逐一查 ``sqlite_master``（联系人数×分片数
+        次查询），这里是分片数次查询。
+        """
+        table_map: dict[str, list[tuple[sqlite3.Connection, str, int]]] = {}
+        for shard_index, conn in enumerate(self.conns):
+            try:
+                cur = conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name LIKE 'Msg\\_%' ESCAPE '\\'"
+                )
+                for row in cur.fetchall():
+                    name = str(row[0])
+                    digest = name[len("Msg_"):]
+                    if not digest:
+                        continue
+                    table_map.setdefault(digest, []).append((conn, name, shard_index))
+            except Exception:
+                continue
+        return table_map
+
     def get_contacts(self) -> list[dict]:
-        """获取聊天联系人列表"""
+        """获取聊天联系人列表。
+
+        结果按实例缓存并返回字典副本（解密快照静态，聚合结果不可变）；
+        调用方对返回值的修改不会影响缓存。
+        """
+        cached = self._contacts_cache
+        if cached is not None:
+            return [dict(contact) for contact in cached]
+        with self._contacts_lock:
+            if self._contacts_cache is None:
+                self._contacts_cache = self._compute_contacts()
+            return [dict(contact) for contact in self._contacts_cache]
+
+    def _compute_contacts(self) -> list[dict]:
         contacts = {}
         for conn in self.conns:
             try:
@@ -1197,13 +1243,15 @@ class MessageParserV4:
                 pass
 
         # 获取每个聊天的摘要（同一聊天可能横跨多个 message_N.db）
+        table_map = self._get_msg_table_map()
         for username in contacts:
-            msg_tables = self._get_msg_tables(username)
+            digest = hashlib.md5(username.encode()).hexdigest()
+            msg_tables = table_map.get(digest)
             if not msg_tables:
                 continue
             latest = None
             total_count = 0
-            for shard_index, (msg_conn, table) in enumerate(msg_tables):
+            for shard_index, (msg_conn, table, _seq) in enumerate(msg_tables):
                 try:
                     cur = msg_conn.cursor()
                     cur.execute(
@@ -1418,10 +1466,18 @@ class MessageParserV4:
         end_time: Optional[int] = None,
         sender_name: Optional[str] = None,
         message_ids: Optional[list[int]] = None,
+        reverse: bool = False,
     ) -> dict:
         """获取与指定联系人的聊天消息
 
         支持按消息类型、关键词、时间范围、消息ID筛选。
+
+        ``reverse=True`` 时按时间倒序分页（page=1 即最新一页），
+        供仅需末尾消息的场景避免深页的全量候选加载。
+
+        总数按过滤条件缓存在实例上：解密快照在实例生命周期内是静态
+        文件，同一过滤条件的 COUNT 结果不可能变化，翻页时不再重复
+        全表扫描（keyword LIKE 场景收益最大）。
         """
         msg_tables = self._get_msg_tables(talker)
         if not msg_tables:
@@ -1468,18 +1524,33 @@ class MessageParserV4:
             params.extend(message_ids)
 
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        filter_key = (
+            talker,
+            None if msg_type is None else int(msg_type) & 0xFFFFFFFF,
+            keyword or "",
+            start_time,
+            end_time,
+            sender_name or "",
+            tuple(sorted(set(message_ids))) if message_ids else (),
+        )
+        cached_total = self._message_total_cache.get(filter_key)
+        need_counts = cached_total is None
         offset = (page - 1) * page_size
         candidate_limit = offset + page_size
         total = 0
         candidates = []
+        shard_counts: list[int] = []
+        order = "DESC" if reverse else "ASC"
 
         # 各分片先取全局当前页可能用到的前 N 条，再统一排序和切页。
         # 一个分片中排在其前 N 条之后的记录，不可能进入全局前 N 条。
         for shard_index, (msg_conn, table) in enumerate(msg_tables):
+            shard_count = None
             try:
                 cur = msg_conn.cursor()
-                cur.execute(f"SELECT COUNT(*) FROM [{table}]{where}", params)
-                shard_total = cur.fetchone()[0]
+                if need_counts:
+                    cur.execute(f"SELECT COUNT(*) FROM [{table}]{where}", params)
+                    shard_count = cur.fetchone()[0]
 
                 cur.execute(
                     f"""
@@ -1487,25 +1558,38 @@ class MessageParserV4:
                            create_time, message_content, source, packed_info_data,
                            WCDB_CT_message_content
                     FROM [{table}]{where}
-                    ORDER BY create_time ASC, local_id ASC
+                    ORDER BY create_time {order}, local_id {order}
                     LIMIT ?
                     """,
                     params + [candidate_limit],
                 )
                 rows = cur.fetchall()
-                total += shard_total
-                for row in rows:
-                    candidates.append((
-                        row["create_time"] or 0,
-                        row["local_id"] or 0,
-                        shard_index,
-                        msg_conn,
-                        row,
-                    ))
             except Exception:
                 continue
 
-        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+            # 仅当同一分片的候选查询也成功时才计入总数（与原实现一致）
+            if need_counts and shard_count is not None:
+                shard_counts.append(shard_count)
+            for row in rows:
+                candidates.append((
+                    row["create_time"] or 0,
+                    row["local_id"] or 0,
+                    shard_index,
+                    msg_conn,
+                    row,
+                ))
+
+        if need_counts:
+            total = sum(shard_counts)
+            if len(self._message_total_cache) >= _MESSAGE_TOTAL_CACHE_MAX:
+                self._message_total_cache.clear()
+            self._message_total_cache[filter_key] = total
+        else:
+            total = cached_total
+
+        candidates.sort(
+            key=lambda item: (item[0], item[1], item[2]), reverse=reverse
+        )
         page_rows = candidates[offset:offset + page_size]
         messages = [
             self._format_message(row, talker, conn=msg_conn)

@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -42,6 +43,9 @@ MAX_EXTRA_HEADERS_BYTES = 64 * 1024
 MAX_CHUNKS = 128
 MAX_REDUCE_ROUNDS = 8
 REDUCE_BATCH_CHARS = 52_000
+# Map/Reduce 阶段相互独立的模型请求并行度。4 在「明显提速」与
+# 「避免触发用户服务商限流」之间取平衡；全局最多 2 个分析任务即最多 8 路并发。
+AI_MAP_CONCURRENCY = 4
 
 _HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _PLACEHOLDER_RE = re.compile(r"{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}")
@@ -1185,6 +1189,37 @@ class AnalysisEngine:
             self._run_control.check()
         return _redact_api_key(_response_text(value), self.config.api_key)
 
+    def _complete_many(self, jobs: List[dict]) -> List[str]:
+        """并行执行相互独立的补全请求，按输入顺序返回结果。
+
+        Map/Reduce 阶段各请求彼此独立，用小线程池并行以缩短总耗时；
+        任一请求失败或触发取消时，取消尚未启动的任务并立即失败——
+        与串行版本「首个错误即中止整体」的语义一致。取消与限时检查
+        由 :meth:`_complete` 和共享的 :class:`AnalysisRunControl` 在每个
+        工作线程内继续生效（``threading.Event`` 与单调时钟天然线程安全）。
+        """
+        if not jobs:
+            return []
+        if len(jobs) == 1 or AI_MAP_CONCURRENCY <= 1:
+            return [self._complete(**job) for job in jobs]
+
+        executor = ThreadPoolExecutor(
+            max_workers=min(AI_MAP_CONCURRENCY, len(jobs)),
+            thread_name_prefix="ai-analysis",
+        )
+        futures = []
+        try:
+            futures = [executor.submit(self._complete, **job) for job in jobs]
+            results = [future.result() for future in futures]
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            # 不等待进行中的请求（其内部会在下一个检查点自行中止）
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        executor.shutdown(wait=True)
+        return results
+
     def analyze(
         self,
         text: str,
@@ -1264,28 +1299,26 @@ class AnalysisEngine:
             )
             request_count = 1
         else:
-            summaries: List[str] = []
-            for index, chunk in enumerate(chunks, 1):
-                prompt = _map_prompt(
-                    chunk,
-                    index=index,
-                    total=len(chunks),
-                    source_type=source_type,
-                    strength=self.config.strength,
-                    requirements=requirements,
-                )
-                summaries.append(
-                    self._complete(
-                        system_prompt,
-                        prompt,
-                        max_output_tokens=min(
-                            self.config.max_output_tokens, profile["map_tokens"]
-                        ),
+            map_token_cap = min(self.config.max_output_tokens, profile["map_tokens"])
+            map_jobs = [
+                {
+                    "system_prompt": system_prompt,
+                    "user_prompt": _map_prompt(
+                        chunk,
+                        index=index,
+                        total=len(chunks),
                         source_type=source_type,
-                    )
-                )
-                request_count += 1
-                map_count += 1
+                        strength=self.config.strength,
+                        requirements=requirements,
+                    ),
+                    "max_output_tokens": map_token_cap,
+                    "source_type": source_type,
+                }
+                for index, chunk in enumerate(chunks, 1)
+            ]
+            summaries = self._complete_many(map_jobs)
+            request_count += len(map_jobs)
+            map_count += len(map_jobs)
 
             while len(_format_summaries(summaries)) > REDUCE_BATCH_CHARS:
                 if reduce_rounds >= MAX_REDUCE_ROUNDS:
@@ -1293,27 +1326,25 @@ class AnalysisEngine:
                 batches = _batch_summaries(summaries, REDUCE_BATCH_CHARS)
                 if len(batches) >= len(summaries):
                     raise AIAnalysisError("文本分析中间结果无法继续安全归并")
-                reduced: List[str] = []
-                for batch in batches:
-                    prompt = _reduce_prompt(
-                        _format_summaries(batch),
-                        source_type=source_type,
-                        strength=self.config.strength,
-                        requirements=requirements,
-                    )
-                    reduced.append(
-                        self._complete(
-                            system_prompt,
-                            prompt,
-                            max_output_tokens=min(
-                                self.config.max_output_tokens,
-                                profile["reduce_tokens"],
-                            ),
+                reduce_token_cap = min(
+                    self.config.max_output_tokens, profile["reduce_tokens"]
+                )
+                reduce_jobs = [
+                    {
+                        "system_prompt": system_prompt,
+                        "user_prompt": _reduce_prompt(
+                            _format_summaries(batch),
                             source_type=source_type,
-                        )
-                    )
-                    request_count += 1
-                summaries = reduced
+                            strength=self.config.strength,
+                            requirements=requirements,
+                        ),
+                        "max_output_tokens": reduce_token_cap,
+                        "source_type": source_type,
+                    }
+                    for batch in batches
+                ]
+                summaries = self._complete_many(reduce_jobs)
+                request_count += len(reduce_jobs)
                 reduce_rounds += 1
 
             prompt = _final_prompt(

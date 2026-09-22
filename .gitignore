@@ -72,3 +72,6 @@ desktop.ini
 *.tmp
 temp/
 .test-app-data/
+
+# Local agent workspace data
+.workbuddy/

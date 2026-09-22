@@ -58,6 +58,16 @@ npm --prefix desktop run check
 
 7. 更新与改动相关的 README、项目指南或 `CHANGELOG.md`。
 
+### 可选：pre-commit 钩子
+
+仓库提供 `.pre-commit-config.yaml`，在本地提交时自动运行与 CI 相同的 ruff 检查：
+
+```powershell
+pip install pre-commit
+pre-commit install
+pre-commit run --all-files   # 手动全量检查
+```
+
 ## Pull Request 检查清单
 
 - [ ] 没有包含真实账号、密钥、聊天内容、数据库或本地绝对路径

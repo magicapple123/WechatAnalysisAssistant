@@ -1,5 +1,7 @@
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +10,40 @@ from backend import app_paths, key_extractor, settings
 
 
 class ApplicationPathTests(unittest.TestCase):
+    def test_prune_cache_directory_removes_oldest_files_first(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_file = root / "old.bin"
+            middle_file = root / "middle.bin"
+            new_file = root / "new.bin"
+            old_file.write_bytes(b"a" * 600)
+            middle_file.write_bytes(b"m" * 600)
+            new_file.write_bytes(b"n" * 600)
+            past = time.time() - 7200
+            middle_time = time.time() - 3600
+            os.utime(old_file, (past, past))
+            os.utime(middle_file, (middle_time, middle_time))
+
+            removed = app_paths.prune_cache_directory(root, 1000)
+
+            self.assertEqual(removed, 2)
+            self.assertFalse(old_file.exists())
+            self.assertFalse(middle_file.exists())
+            self.assertTrue(new_file.exists())
+
+    def test_prune_cache_directory_noop_when_under_cap_or_missing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            kept = root / "kept.bin"
+            kept.write_bytes(b"x" * 100)
+            self.assertEqual(app_paths.prune_cache_directory(root, 1000), 0)
+            self.assertTrue(kept.exists())
+            self.assertEqual(
+                app_paths.prune_cache_directory(root / "missing", 1000), 0
+            )
+            self.assertEqual(app_paths.prune_cache_directory(root, 0), 0)
+            self.assertTrue(kept.exists())
+
     def test_windows_app_data_path_and_explicit_override(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -243,13 +243,13 @@ class ImageRouteSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejects_explicit_empty_or_implicit_unbounded_scope(self):
         with self.assertRaises(HTTPException) as empty:
-            await api.recognize_chat_images(
+            api.recognize_chat_images(
                 "friend", api.ImageRecognitionRequest(message_refs=[])
             )
         self.assertEqual(empty.exception.status_code, 400)
 
         with self.assertRaises(HTTPException) as implicit_all:
-            await api.recognize_chat_images(
+            api.recognize_chat_images(
                 "friend", api.ImageRecognitionRequest()
             )
         self.assertEqual(implicit_all.exception.status_code, 400)

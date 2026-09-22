@@ -246,7 +246,7 @@ class MomentsRouteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_contacts_and_export_require_local_client_header(self):
         with self.assertRaises(HTTPException) as contacts_error:
-            await api.get_moments_contacts(None)
+            api.get_moments_contacts(None)
         self.assertEqual(contacts_error.exception.status_code, 403)
 
         with self.assertRaises(HTTPException) as export_error:
@@ -256,7 +256,7 @@ class MomentsRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(export_error.exception.status_code, 403)
 
         with self.assertRaises(HTTPException) as preview_error:
-            await api.preview_moments(
+            api.preview_moments(
                 api.MomentsPreviewRequest(username="wxid_friend"), None
             )
         self.assertEqual(preview_error.exception.status_code, 403)
@@ -284,7 +284,7 @@ class MomentsRouteTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         with patch.object(api, "get_moments_service", return_value=service):
-            response = await api.get_moments_contacts("1")
+            response = api.get_moments_contacts("1")
 
         payload = json.loads(response.body.decode("utf-8"))
         self.assertEqual(payload["data"]["total_contacts"], 1)
@@ -473,7 +473,7 @@ class MomentsRouteTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch.object(api, "get_moments_service", return_value=service):
-            response = await api.preview_moments(
+            response = api.preview_moments(
                 api.MomentsPreviewRequest(username="wxid_friend"), "1"
             )
 
@@ -563,7 +563,7 @@ class MomentsRouteTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     api, "get_moments_media_resolver", return_value=resolver
                 ):
-            response = await api.preview_moments(
+            response = api.preview_moments(
                 api.MomentsPreviewRequest(
                     username="wxid_friend",
                     page=2,

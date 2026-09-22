@@ -29,7 +29,7 @@ from typing import Any, Iterable, Optional, Sequence
 
 from PIL import Image, UnidentifiedImageError
 
-from .app_paths import app_data_path
+from .app_paths import app_data_path, prune_cache_directory
 from .image_service import ImageResolutionError, decrypt_dat_bytes, detect_image_format
 
 
@@ -43,6 +43,8 @@ QUALITY_HIGH = "high"
 QUALITY_UNKNOWN = "unknown"
 
 DEFAULT_MAX_FILE_BYTES = 32 * 1024 * 1024
+# 单账号朋友圈 blob 缓存容量上限：存储初始化（低频）时按 mtime 淘汰最旧文件
+MOMENTS_BLOB_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 DEFAULT_MAX_PIXELS = 40_000_000
 DEFAULT_MAX_FRAMES = 200
 DEFAULT_MAX_SCAN_FILES = 50_000
@@ -307,6 +309,9 @@ class MomentsMediaStore:
         self.max_pixels = int(max_pixels)
         self.max_frames = int(max_frames)
         self.blob_root.mkdir(parents=True, exist_ok=True)
+        # 内容寻址 blob 只增不减：存储初始化（低频）时按容量淘汰最旧文件，
+        # 被淘汰的 blob 在下次访问对应动态时会重新解析/下载并写回。
+        prune_cache_directory(self.blob_root, MOMENTS_BLOB_CACHE_MAX_BYTES)
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:

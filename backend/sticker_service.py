@@ -24,7 +24,7 @@ from urllib.parse import parse_qsl, urljoin, urlsplit
 
 from Crypto.Cipher import AES
 
-from .app_paths import app_data_path
+from .app_paths import app_data_path, prune_cache_directory
 from .moments import (
     DownloadedMedia,
     MomentsMediaDownloadError,
@@ -42,6 +42,8 @@ _SPECIAL_DECODE_SECONDS = 15.0
 _SPECIAL_MAX_PACKETS = 8_000
 _SPECIAL_MAX_PARTITIONS = 1_200
 _SPECIAL_MAX_CONTAINER_BYTES = 32 * 1024 * 1024
+# 单账号表情缓存容量上限：服务初始化（低频）时按 mtime 淘汰最旧文件
+STICKER_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 _SPECIAL_DECODE_SEMAPHORE = threading.BoundedSemaphore(value=2)
 _PILLOW_SPECIAL_FORMATS = {
     "AVIF",
@@ -1056,6 +1058,8 @@ class StickerService:
         account_hash = hashlib.sha256(account.encode("utf-8")).hexdigest()[:24]
         self.cache_dir = Path(cache_root) / account_hash
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # 长期浏览会使表情缓存无界增长；服务初始化（低频）时按容量淘汰最旧文件
+        prune_cache_directory(self.cache_dir, STICKER_CACHE_MAX_BYTES)
         self.emoticon_db_path = (
             Path(emoticon_db_path) if emoticon_db_path else None
         )

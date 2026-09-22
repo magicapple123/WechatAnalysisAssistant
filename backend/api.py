@@ -500,6 +500,10 @@ _moments_service_fingerprints: dict[str, tuple] = {}
 _moments_service_cache_lock = threading.RLock()
 _moments_media_resolver_cache: dict[tuple, MomentsMediaResolver] = {}
 _avatar_service_cache: dict[tuple, AvatarService] = {}
+# 守卫其余运行时服务缓存（parser/decryptor/image/voice/avatar/moments_resolver）
+# 的查建过程：这些构造是秒级重活且非原子，无锁时线程池并发会重复解密同一库。
+# 锁序固定为 runtime → sticker/moments，避免与下方两个专用锁死锁。
+_runtime_cache_lock = threading.RLock()
 _sticker_service_cache: dict[tuple, StickerService] = {}
 _sticker_service_cache_lock = threading.RLock()
 _avatar_url_secret = secrets.token_bytes(32)
@@ -532,7 +536,7 @@ def _close_runtime_caches(cancel_recognition: bool = True) -> None:
         with _analysis_cancel_events_lock:
             for cancel_event in tuple(_analysis_cancel_events):
                 cancel_event.set()
-    with _sticker_service_cache_lock, _moments_service_cache_lock:
+    with _runtime_cache_lock, _sticker_service_cache_lock, _moments_service_cache_lock:
         services = list(
             {id(item): item for item in _image_service_cache.values()}.values()
         )
@@ -695,15 +699,16 @@ def get_image_service() -> WeChatImageService:
     if is_plaintext:
         resource_path = encrypted_resource
     else:
-        decryptor_key = str(encrypted_resource)
-        if decryptor_key not in _decryptor_cache:
-            _decryptor_cache[decryptor_key] = DatabaseDecryptor(
-                encrypted_resource, config.key
-            )
-        try:
-            resource_path = _decryptor_cache[decryptor_key].decrypt_to_temp()
-        except Exception as exc:
-            raise HTTPException(500, f"图片资源数据库解密失败: {exc}") from exc
+        with _runtime_cache_lock:
+            decryptor_key = str(encrypted_resource)
+            if decryptor_key not in _decryptor_cache:
+                _decryptor_cache[decryptor_key] = DatabaseDecryptor(
+                    encrypted_resource, config.key
+                )
+            try:
+                resource_path = _decryptor_cache[decryptor_key].decrypt_to_temp()
+            except Exception as exc:
+                raise HTTPException(500, f"图片资源数据库解密失败: {exc}") from exc
 
     settings = load_settings()
     image_settings = get_account_image_settings(settings, config.wxid)
@@ -713,17 +718,18 @@ def get_image_service() -> WeChatImageService:
         str(image_settings.get("aes_key") or ""),
         str(image_settings.get("xor_key") or "auto"),
     )
-    if cache_key not in _image_service_cache:
-        # config.msg_dir = <account>/db_storage/message
-        account_root = config.msg_dir.parent.parent
-        _image_service_cache[cache_key] = WeChatImageService(
-            account_id=config.wxid,
-            account_root=account_root,
-            resource_db_path=resource_path,
-            aes_key=image_settings.get("aes_key"),
-            xor_key=image_settings.get("xor_key", "auto"),
-        )
-    return _image_service_cache[cache_key]
+    with _runtime_cache_lock:
+        if cache_key not in _image_service_cache:
+            # config.msg_dir = <account>/db_storage/message
+            account_root = config.msg_dir.parent.parent
+            _image_service_cache[cache_key] = WeChatImageService(
+                account_id=config.wxid,
+                account_root=account_root,
+                resource_db_path=resource_path,
+                aes_key=image_settings.get("aes_key"),
+                xor_key=image_settings.get("xor_key", "auto"),
+            )
+        return _image_service_cache[cache_key]
 
 
 def get_voice_service() -> WeChatVoiceService:
@@ -734,16 +740,17 @@ def get_voice_service() -> WeChatVoiceService:
         raise HTTPException(400, "请先选择微信账号并设置数据库解密密钥")
 
     cache_key = (config.wxid, str(config.msg_dir.resolve()), config.key)
-    if cache_key not in _voice_service_cache:
-        try:
-            _voice_service_cache[cache_key] = WeChatVoiceService(
-                account_id=config.wxid,
-                msg_dir=config.msg_dir,
-                database_key=config.key,
-            )
-        except VoiceServiceError as exc:
-            raise HTTPException(exc.status_code, str(exc)) from exc
-    return _voice_service_cache[cache_key]
+    with _runtime_cache_lock:
+        if cache_key not in _voice_service_cache:
+            try:
+                _voice_service_cache[cache_key] = WeChatVoiceService(
+                    account_id=config.wxid,
+                    msg_dir=config.msg_dir,
+                    database_key=config.key,
+                )
+            except VoiceServiceError as exc:
+                raise HTTPException(exc.status_code, str(exc)) from exc
+        return _voice_service_cache[cache_key]
 
 
 def get_sticker_service() -> StickerService:
@@ -764,7 +771,7 @@ def get_sticker_service() -> StickerService:
     encrypted_identity = str(encrypted_emoticon.resolve())
     key_fingerprint = hashlib.sha256(database_key.encode("utf-8")).hexdigest()
     cache_key = (account_id, encrypted_identity, key_fingerprint)
-    with _sticker_service_cache_lock:
+    with _runtime_cache_lock, _sticker_service_cache_lock:
         cached = _sticker_service_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -1689,35 +1696,36 @@ def get_parser():
     """获取微信 4.x 解析器实例（带缓存）。"""
     db_key = str(config.msg_dir)
 
-    if db_key not in _parser_cache:
-        if not config.key or not config.msg_dir:
-            raise HTTPException(400, "请先设置解密密钥")
-        if not _is_xwechat():
-            raise HTTPException(400, "当前仅支持微信 4.x 数据目录")
+    with _runtime_cache_lock:
+        if db_key not in _parser_cache:
+            if not config.key or not config.msg_dir:
+                raise HTTPException(400, "请先设置解密密钥")
+            if not _is_xwechat():
+                raise HTTPException(400, "当前仅支持微信 4.x 数据目录")
 
-        msg_dbs = config.get_all_msg_dbs()
-        if not msg_dbs:
-            raise HTTPException(404, "未找到消息数据库")
-        connections = []
-        for db_path in msg_dbs:
-            path_key = str(db_path)
-            if path_key not in _decryptor_cache:
-                _decryptor_cache[path_key] = DatabaseDecryptor(db_path, config.key)
-            connections.append(_decryptor_cache[path_key].open_decrypted())
+            msg_dbs = config.get_all_msg_dbs()
+            if not msg_dbs:
+                raise HTTPException(404, "未找到消息数据库")
+            connections = []
+            for db_path in msg_dbs:
+                path_key = str(db_path)
+                if path_key not in _decryptor_cache:
+                    _decryptor_cache[path_key] = DatabaseDecryptor(db_path, config.key)
+                connections.append(_decryptor_cache[path_key].open_decrypted())
 
-        contact_conn = None
-        contact_path = config.micromsg_db
-        if contact_path and contact_path.exists():
-            ck = str(contact_path)
-            if ck not in _decryptor_cache:
-                _decryptor_cache[ck] = DatabaseDecryptor(contact_path, config.key)
-            contact_conn = _decryptor_cache[ck].open_decrypted()
+            contact_conn = None
+            contact_path = config.micromsg_db
+            if contact_path and contact_path.exists():
+                ck = str(contact_path)
+                if ck not in _decryptor_cache:
+                    _decryptor_cache[ck] = DatabaseDecryptor(contact_path, config.key)
+                contact_conn = _decryptor_cache[ck].open_decrypted()
 
-        _parser_cache[db_key] = MessageParserV4(
-            connections, config.wx_root, config.wxid, contact_conn
-        )
+            _parser_cache[db_key] = MessageParserV4(
+                connections, config.wx_root, config.wxid, contact_conn
+            )
 
-    return _parser_cache[db_key]
+        return _parser_cache[db_key]
 
 
 def _connection_database_path(conn) -> Optional[Path]:
@@ -1748,33 +1756,34 @@ def get_avatar_service() -> AvatarService:
         str(head_source.resolve()) if head_source else "",
         key_fingerprint,
     )
-    if cache_key in _avatar_service_cache:
-        return _avatar_service_cache[cache_key]
+    with _runtime_cache_lock:
+        if cache_key in _avatar_service_cache:
+            return _avatar_service_cache[cache_key]
 
-    def open_snapshot(source: Optional[Path]) -> Optional[Path]:
-        if source is None or not source.is_file():
-            return None
-        source_key = str(source.resolve())
-        try:
-            if source_key not in _decryptor_cache:
-                _decryptor_cache[source_key] = DatabaseDecryptor(source, config.key)
-            conn = _decryptor_cache[source_key].open_decrypted()
-            return _connection_database_path(conn)
-        except Exception:
-            return None
+        def open_snapshot(source: Optional[Path]) -> Optional[Path]:
+            if source is None or not source.is_file():
+                return None
+            source_key = str(source.resolve())
+            try:
+                if source_key not in _decryptor_cache:
+                    _decryptor_cache[source_key] = DatabaseDecryptor(source, config.key)
+                conn = _decryptor_cache[source_key].open_decrypted()
+                return _connection_database_path(conn)
+            except Exception:
+                return None
 
-    contact_snapshot = open_snapshot(contact_source)
-    head_snapshot = open_snapshot(head_source)
-    if contact_snapshot is None and head_snapshot is None:
-        raise HTTPException(404, "未找到可读取的微信头像数据库")
+        contact_snapshot = open_snapshot(contact_source)
+        head_snapshot = open_snapshot(head_source)
+        if contact_snapshot is None and head_snapshot is None:
+            raise HTTPException(404, "未找到可读取的微信头像数据库")
 
-    service = AvatarService(
-        account_id=config.wxid,
-        contact_db_path=contact_snapshot,
-        head_image_db_path=head_snapshot,
-    )
-    _avatar_service_cache[cache_key] = service
-    return service
+        service = AvatarService(
+            account_id=config.wxid,
+            contact_db_path=contact_snapshot,
+            head_image_db_path=head_snapshot,
+        )
+        _avatar_service_cache[cache_key] = service
+        return service
 
 
 def _avatar_token(username: str) -> str:
@@ -1873,7 +1882,7 @@ def get_moments_service() -> MomentsService:
         # rebuilding the same snapshot.  Superseded SNS decryptors deliberately
         # remain in _decryptor_cache until the normal runtime cleanup: a running
         # export may still hold the old MomentsService and SQLite connection.
-        with _moments_service_cache_lock:
+        with _runtime_cache_lock, _moments_service_cache_lock:
             source_fingerprint = _moments_source_fingerprint(sns_path)
             cached_service = _moments_service_cache.get(service_key)
             if (
@@ -1961,18 +1970,19 @@ def get_moments_media_resolver() -> MomentsMediaResolver:
         aes_key,
         str(xor_key),
     )
-    if cache_key not in _moments_media_resolver_cache:
-        _moments_media_resolver_cache[cache_key] = MomentsMediaResolver(
-            account_id=config.wxid,
-            aes_key=aes_key or None,
-            xor_key=xor_key,
-            sns_cache_root=account_root / "cache",
-            # A user-triggered refresh must remain bounded even when years of
-            # WeChat cache are present. Existing bindings persist in the
-            # account-isolated manifest, so later runs can continue safely.
-            max_scan_files=3000,
-        )
-    return _moments_media_resolver_cache[cache_key]
+    with _runtime_cache_lock:
+        if cache_key not in _moments_media_resolver_cache:
+            _moments_media_resolver_cache[cache_key] = MomentsMediaResolver(
+                account_id=config.wxid,
+                aes_key=aes_key or None,
+                xor_key=xor_key,
+                sns_cache_root=account_root / "cache",
+                # A user-triggered refresh must remain bounded even when years of
+                # WeChat cache are present. Existing bindings persist in the
+                # account-isolated manifest, so later runs can continue safely.
+                max_scan_files=3000,
+            )
+        return _moments_media_resolver_cache[cache_key]
 
 
 class _MomentsExportSnapshot:
@@ -2406,8 +2416,8 @@ async def switch_account(data: SwitchAccountRequest):
 
 
 @app.get("/api/auto-detect")
-async def auto_detect():
-    """自动检测微信数据和密钥"""
+def auto_detect():
+    """自动检测微信数据和密钥（扫描磁盘目录，属同步重活，走线程池）"""
     if not config.accounts:
         config.detect_and_set_accounts()
     else:
@@ -2464,7 +2474,7 @@ async def auto_detect():
 
 
 @app.post("/api/set-key")
-async def set_key(data: KeyInput):
+def set_key(data: KeyInput):
     """手动设置解密密钥"""
     key = data.key.strip().lower()
 
@@ -2626,9 +2636,10 @@ def _extract_key_with_python_fallback() -> dict:
     config.key = candidate
     save_key(candidate, account_id)
     _close_runtime_caches(cancel_recognition=True)
+    # 密钥已保存到本机账号设置；不通过 HTTP 响应回传明文，
+    # 避免本机其他进程调用该接口即可拿到数据库密钥。
     return {
         "success": True,
-        "key": candidate,
         "verified": True,
         "source": "python_memory_fallback",
         "hook_available": False,
@@ -2816,9 +2827,9 @@ def _extract_key_sync():
                     config.key = raw_key
                     save_key(raw_key, config.wxid)
                     _close_runtime_caches(cancel_recognition=True)
+                    # 同上：密钥已在服务端验证并保存，不回传明文。
                     return {
                         "success": True,
-                        "key": raw_key,
                         "verified": verified,
                         "source": "wx_key_hook",
                         "hook_available": True,
@@ -2907,8 +2918,10 @@ async def get_avatar(
     )
 
 
+# 同步重型路由有意使用 def 而非 async def：FastAPI 会自动将同步路由放入线程池执行，
+# 避免 SQLite 查询、解密与消息解析等 CPU 密集操作阻塞事件循环（拖慢图片/语音等并发请求）。
 @app.get("/api/chats")
-async def get_chats():
+def get_chats():
     """获取聊天列表"""
     parser = get_parser()
     contacts = parser.get_contacts()
@@ -2921,7 +2934,7 @@ async def get_chats():
 
 
 @app.get("/api/contacts")
-async def get_contacts_directory():
+def get_contacts_directory():
     """Return the bounded WeChat 4.x address book, not only chat sessions."""
     parser = get_parser()
     contacts = parser.get_address_book()
@@ -2943,7 +2956,7 @@ async def get_contacts_directory():
 
 
 @app.get("/api/chat/{talker}")
-async def get_messages(
+def get_messages(
     talker: str,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -2972,7 +2985,7 @@ async def get_messages(
 
 
 @app.get("/api/chat/{talker}/timerange")
-async def get_chat_timerange(talker: str):
+def get_chat_timerange(talker: str):
     """获取聊天的消息时间范围 (起止时间戳)"""
     parser = get_parser()
     result = parser.get_messages(talker, page=1, page_size=1)
@@ -2980,15 +2993,14 @@ async def get_chat_timerange(talker: str):
         return {"success": True, "start_time": None, "end_time": None}
     # 第一条 (最旧)
     first = result["messages"][0]["create_time"] if result["messages"] else None
-    # 最后一条 (最新)
-    last_page = result["total_pages"]
-    last_result = parser.get_messages(talker, page=last_page, page_size=1)
+    # 最后一条 (最新)：反向取第 1 页，避免深页把全表候选加载进内存
+    last_result = parser.get_messages(talker, page=1, page_size=1, reverse=True)
     last = last_result["messages"][0]["create_time"] if last_result["messages"] else None
     return {"success": True, "start_time": first, "end_time": last}
 
 
 @app.get("/api/message-position/{talker}/{msg_id}")
-async def get_message_position(
+def get_message_position(
     talker: str,
     msg_id: int,
     create_time: Optional[int] = Query(None, ge=0),
@@ -3008,7 +3020,7 @@ async def get_message_position(
 
 
 @app.get("/api/search")
-async def search_messages(
+def search_messages(
     keyword: str = Query(..., min_length=1),
     limit: int = Query(100, ge=1, le=500),
 ):
@@ -3025,7 +3037,7 @@ async def search_messages(
 
 
 @app.get("/api/statistics")
-async def get_statistics():
+def get_statistics():
     """获取聊天统计"""
     parser = get_parser()
     stats = parser.get_statistics()
@@ -3188,6 +3200,9 @@ async def extract_chat_image_key(
     global _image_key_extraction_running
     if x_wechat_assistant != "1":
         raise HTTPException(403, "图片密钥提取请求缺少本机客户端标识")
+    # 注意：下面的占用检查与函数后部 `_image_key_extraction_running = True` 之间
+    # 不得插入任何 await —— 事件循环单线程下两者之间没有挂起点即天然原子，
+    # 并发请求无法重复通过检查。若未来需要在两者之间加 await，请改用 asyncio.Lock。
     if _image_key_extraction_running:
         raise HTTPException(409, "图片密钥正在获取中，请勿重复点击")
     if _recognition_manager.has_active_runs:
@@ -3278,7 +3293,7 @@ async def extract_chat_image_key(
 
 
 @app.post("/api/chat/{talker}/images/recognize")
-async def recognize_chat_images(talker: str, req: ImageRecognitionRequest):
+def recognize_chat_images(talker: str, req: ImageRecognitionRequest):
     """Create a background task after the user explicitly requests recognition."""
     if _image_key_extraction_running:
         raise HTTPException(409, "图片密钥正在获取中，请等待完成后再识别图片")
@@ -3433,7 +3448,8 @@ async def start_image_hd_automation(
         raise HTTPException(501, "批量获取高清图片仅支持微信 4.x")
     parser = get_parser()
     max_images = 500
-    media, image_messages = _collect_image_viewer_sequence(
+    media, image_messages = await asyncio.to_thread(
+        _collect_image_viewer_sequence,
         parser,
         talker,
         start_time=start_time,
@@ -3611,7 +3627,7 @@ async def cancel_image_hd_automation_task(
 
 
 @app.post("/api/chat/{talker}/voices/transcribe")
-async def transcribe_chat_voices(
+def transcribe_chat_voices(
     talker: str,
     req: VoiceTranscriptionRequest,
     x_wechat_assistant: Optional[str] = Header(
@@ -4500,7 +4516,7 @@ async def select_folder():
 
 
 @app.get("/api/moments/contacts")
-async def get_moments_contacts(
+def get_moments_contacts(
     x_wechat_assistant: Optional[str] = Header(
         None, alias="X-Wechat-Assistant"
     ),
@@ -4820,7 +4836,7 @@ def _load_moments_preview_media_sync(
 
 
 @app.post("/api/moments/preview")
-async def preview_moments(
+def preview_moments(
     req: MomentsPreviewRequest,
     x_wechat_assistant: Optional[str] = Header(
         None, alias="X-Wechat-Assistant"
@@ -5057,7 +5073,8 @@ async def analyze_chat_records(
         preset_id,
     ) = _resolve_analysis_options(req, settings)
     parser = get_parser()
-    messages = _collect_chat_analysis_messages(
+    messages = await asyncio.to_thread(
+        _collect_chat_analysis_messages,
         parser,
         talker,
         message_refs=req.message_refs if has_references else None,
@@ -5066,7 +5083,9 @@ async def analyze_chat_records(
     )
     if not messages:
         raise HTTPException(404, "所选范围内没有可分析的聊天记录")
-    records = _chat_records_for_analysis(messages, peer_name=req.display_name)
+    records = await asyncio.to_thread(
+        _chat_records_for_analysis, messages, peer_name=req.display_name
+    )
     report_title = str(req.report_title or "").strip() or (
         f"{req.display_name}聊天记录 AI 分析报告"
     )
@@ -5165,8 +5184,9 @@ async def analyze_moments_records(
     ) = _resolve_analysis_options(req, settings)
     service = get_moments_service()
     try:
-        contacts = service.get_contacts()
-        posts = service.get_posts(
+        contacts = await asyncio.to_thread(service.get_contacts)
+        posts = await asyncio.to_thread(
+            service.get_posts,
             usernames,
             start_time=req.start_time,
             end_time=req.end_time,
@@ -5296,8 +5316,9 @@ async def export_moments(
 
     service = get_moments_service()
     try:
-        contacts_snapshot = service.get_contacts()
-        posts_snapshot = service.get_posts(
+        contacts_snapshot = await asyncio.to_thread(service.get_contacts)
+        posts_snapshot = await asyncio.to_thread(
+            service.get_posts,
             usernames,
             start_time=req.start_time,
             end_time=req.end_time,
@@ -5400,8 +5421,9 @@ def _move_export_file(source: Path, filename: str) -> Path:
     return destination
 
 
+# 同步重型路由：导出可能耗时数分钟，必须在线程池执行而非事件循环上。
 @app.post("/api/export")
-async def export_chat(req: ExportRequest):
+def export_chat(req: ExportRequest):
     """导出单个聊天 — 直接保存到用户配置的导出目录"""
     fmt = str(req.format or "").strip().lower()
     if fmt not in ("html", "json", "csv", "txt"):
@@ -5462,8 +5484,8 @@ async def export_chat(req: ExportRequest):
             try:
                 msg_result = parser.get_messages(req.talker, page=1, page_size=1)
                 if msg_result["total"] > 0:
-                    first_page = parser.get_messages(req.talker, page=1, page_size=1)
-                    first_time = first_page["messages"][0]["create_time"] if first_page["messages"] else None
+                    first_messages = msg_result["messages"]
+                    first_time = first_messages[0]["create_time"] if first_messages else None
                     last_page_num = msg_result["total_pages"]
                     last_page = parser.get_messages(req.talker, page=last_page_num, page_size=1)
                     last_time = last_page["messages"][0]["create_time"] if last_page["messages"] else None
@@ -5522,7 +5544,7 @@ async def export_chat(req: ExportRequest):
 
 
 @app.post("/api/export-all")
-async def export_all(
+def export_all(
     fmt: str = "html",
     replace_images_with_descriptions: bool = False,
     replace_voices_with_transcriptions: bool = False,
@@ -5553,7 +5575,7 @@ async def export_all(
     )
 
     try:
-        zip_path = exporter.export_all_chats(
+        zip_path, failed_chats = exporter.export_all_chats(
             fmt=fmt,
             replace_images_with_descriptions=replace_images_with_descriptions,
             replace_voices_with_transcriptions=replace_voices_with_transcriptions,
@@ -5566,7 +5588,12 @@ async def export_all(
 
     final_path = str(dest_path)
     print(f"[导出] 已保存到: {final_path}")
-    return {"success": True, "path": final_path, "filename": dest_path.name}
+    return {
+        "success": True,
+        "path": final_path,
+        "filename": dest_path.name,
+        "failed_chats": failed_chats,
+    }
 
 
 # --- 前端静态文件 ---

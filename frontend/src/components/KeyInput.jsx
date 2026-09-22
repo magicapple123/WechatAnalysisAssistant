@@ -43,10 +43,10 @@ export default function KeyInput({ onSubmit, error, status }) {
     setLocalError('');
     try {
       const response = await api.extractKey();
-      if (response.success && response.key) {
-        setKey(response.key);
+      // 后端已验证并保存密钥，响应不含密钥明文；直接进入软件即可。
+      if (response.success) {
         setExtractProgress('密钥已提取并通过验证，正在进入软件…');
-        await onSubmit(response.key);
+        await onSubmit();
       } else {
         setLocalError(response.message || '提取失败');
       }

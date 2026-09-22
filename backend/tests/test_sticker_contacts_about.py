@@ -975,7 +975,7 @@ class StickerAndContactsApiTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(api, "get_parser", return_value=parser), patch.object(
             api, "_enrich_chat_avatars"
         ):
-            response = await api.get_contacts_directory()
+            response = api.get_contacts_directory()
         self.assertTrue(response["data"][0]["has_chat"])
         self.assertFalse(response["data"][1]["has_chat"])
         self.assertEqual(response["total"], 2)

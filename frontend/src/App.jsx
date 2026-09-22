@@ -231,6 +231,7 @@ export default function App() {
   ]);
 
   // --- 密钥设置回调 ---
+  // key 为空 = 自动提取路径：后端已完成验证与保存，跳过 set-key 直接刷新状态。
   const handleKeySet = useCallback(async (key) => {
     const requestId = initRequestId.current + 1;
     initRequestId.current = requestId;
@@ -238,7 +239,9 @@ export default function App() {
     contactsRequestId.current += 1;
     setError('');
     try {
-      await api.setKey(key);
+      if (key) {
+        await api.setKey(key);
+      }
       if (requestId !== initRequestId.current) return;
       hasEnteredKey.current = true;  // 标记已验证，刷新时跳过密钥页
       const updatedStatus = await api.getStatus();

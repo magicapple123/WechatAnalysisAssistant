@@ -22,7 +22,7 @@ CLOUD_SETTINGS = {
 class VoiceRouteSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_create_and_cancel_require_local_client_header(self):
         with self.assertRaises(HTTPException) as create_error:
-            await api.transcribe_chat_voices(
+            api.transcribe_chat_voices(
                 "friend",
                 api.VoiceTranscriptionRequest(all_voices=True),
                 None,
@@ -35,7 +35,7 @@ class VoiceRouteSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_empty_and_implicit_unbounded_scopes_are_rejected(self):
         with self.assertRaises(HTTPException) as empty:
-            await api.transcribe_chat_voices(
+            api.transcribe_chat_voices(
                 "friend",
                 api.VoiceTranscriptionRequest(message_refs=[]),
                 "1",
@@ -43,7 +43,7 @@ class VoiceRouteSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(empty.exception.status_code, 400)
 
         with self.assertRaises(HTTPException) as implicit_all:
-            await api.transcribe_chat_voices(
+            api.transcribe_chat_voices(
                 "friend",
                 api.VoiceTranscriptionRequest(),
                 "1",
@@ -63,7 +63,7 @@ class VoiceRouteSafetyTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(api, "load_settings", return_value=cloud), \
                 patch.object(api, "get_parser") as parser:
             with self.assertRaises(HTTPException) as caught:
-                await api.transcribe_chat_voices(
+                api.transcribe_chat_voices(
                     "friend",
                     api.VoiceTranscriptionRequest(all_voices=True),
                     "1",
@@ -91,7 +91,7 @@ class VoiceRouteSafetyTests(unittest.IsolatedAsyncioTestCase):
                     "start",
                     return_value={"task_id": "voice-task", "status": "queued", "total": 1},
                 ) as start:
-            response = await api.transcribe_chat_voices(
+            response = api.transcribe_chat_voices(
                 "friend",
                 api.VoiceTranscriptionRequest(
                     message_refs=[

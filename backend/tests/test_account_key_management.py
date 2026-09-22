@@ -274,7 +274,7 @@ class AccountKeyAPITests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             api, "delete_saved_key", return_value=True
         ) as delete_saved:
-            response = await api.auto_detect()
+            response = api.auto_detect()
 
         self.assertFalse(response["data"]["key_found"])
         self.assertIsNone(api.config.key)
@@ -305,7 +305,7 @@ class AccountKeyAPITests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             api, "save_key"
         ) as save_key:
-            response = await api.auto_detect()
+            response = api.auto_detect()
 
         self.assertTrue(response["data"]["key_found"])
         self.assertEqual(response["data"]["key_source"], "memory")

@@ -207,3 +207,66 @@ def migrate_legacy_json_file(
     """Migrate a legacy JSON object after validating it is readable."""
 
     return migrate_legacy_file(destination, legacy_paths, validator=_json_validator)
+
+
+def directory_size(directory: Path) -> int:
+    """Return the total byte size of regular files directly inside ``directory``."""
+
+    total = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    return total
+
+
+def prune_cache_directory(directory: Path, max_bytes: int) -> int:
+    """按 mtime 从旧到新淘汰目录内文件，直到总大小不超过 ``max_bytes``。
+
+    用于表情包缓存、朋友圈 blob、图片解密临时副本等可再生缓存目录，
+    防止长期使用后无界增长。递归遍历（含子目录）；被淘汰的缓存条目
+    在下次访问时会自动重建。返回删除的文件数量；
+    目录不存在或未超限时不动任何文件。
+    """
+
+    max_bytes = max(0, int(max_bytes))
+    if max_bytes <= 0 or not directory.is_dir():
+        return 0
+
+    entries = []
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(directory):
+            for name in files:
+                path = os.path.join(root, name)
+                try:
+                    info = os.stat(path)
+                except OSError:
+                    continue
+                if not os.path.isfile(path):
+                    continue
+                entries.append((info.st_mtime_ns, path, info.st_size))
+                total += info.st_size
+    except OSError:
+        return 0
+
+    if total <= max_bytes:
+        return 0
+
+    removed = 0
+    for _, path, size in sorted(entries, key=lambda item: item[0]):
+        if total <= max_bytes:
+            break
+        try:
+            os.unlink(path)
+        except OSError:
+            continue
+        total -= size
+        removed += 1
+    return removed
