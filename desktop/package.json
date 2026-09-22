@@ -1,6 +1,6 @@
 {
   "name": "wechat-analysis-assistant-desktop",
-  "version": "0.1.0-beta.3",
+  "version": "0.1.0-beta.4",
   "private": true,
   "description": "WechatAnalysisAssistant Electron desktop application",
   "type": "module",
