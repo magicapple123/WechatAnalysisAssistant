@@ -3,5 +3,5 @@
 # Exact pins keep the freezer output stable across local and CI builds. Update
 # both together after running scripts/verify-packaging-runtime.py and the
 # packaged Electron smoke test on Windows x64 / CPython 3.12.
-PyInstaller==6.21.0
+PyInstaller==6.22.3
 pyinstaller-hooks-contrib==2026.6
