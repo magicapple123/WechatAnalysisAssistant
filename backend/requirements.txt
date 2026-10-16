@@ -11,7 +11,7 @@ python-multipart==0.0.32
 Pillow>=11.3
 # HEIC/HEIF sticker decoding; Pillow 11.3+ Windows wheels provide AVIF support.
 # The supported runtime baseline is Python 3.10+, so no legacy branch is needed.
-pillow-heif==1.4.0
+pillow-heif==1.5.0
 pywin32>=306
 av>=14.0.0,<19
 silk-python==0.2.8
