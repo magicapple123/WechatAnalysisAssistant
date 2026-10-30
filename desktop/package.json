@@ -27,7 +27,7 @@
     "dist:installer:prepackaged": "electron-builder --win nsis --x64 --prepackaged dist-electron/win-unpacked"
   },
   "dependencies": {
-    "electron-updater": "6.8.9"
+    "electron-updater": "6.8.11"
   },
   "devDependencies": {
     "@electron/fuses": "1.8.0",
